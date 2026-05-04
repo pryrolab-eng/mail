@@ -95,6 +95,8 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
   const [leadDropdownOpen, setLeadDropdownOpen] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isSendingSingle, setIsSendingSingle] = useState(false);
+  const [isEnriching, setIsEnriching] = useState(false);
+  const [enriched, setEnriched] = useState(false);
 
   // Bulk email generation states
   const [bulkMode, setBulkMode] = useState(false);
@@ -114,7 +116,10 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
   }, []);
 
   useEffect(() => {
-    if (preloadedLead) setSelectedLead(preloadedLead);
+    if (preloadedLead) {
+      setSelectedLead(preloadedLead);
+      enrichLead(preloadedLead);
+    }
   }, [preloadedLead]);
 
   const fetchLeads = async () => {
@@ -221,6 +226,51 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
       toast.error("Failed to save email");
     }
     setIsSaving(false);
+  };
+
+  /**
+   * Enrich a lead: visit their website, find real email, build real context.
+   * Fires automatically when a lead is selected from the dropdown.
+   */
+  const enrichLead = async (lead: Lead) => {
+    setIsEnriching(true);
+    setEnriched(false);
+    try {
+      const res = await fetch("/api/enrich-lead", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          leadId: lead.id,
+          companyName: lead.company_name,
+          website: (lead as any).website || null,
+          niche: lead.niche || "",
+          location: lead.location || "",
+        }),
+      });
+      const data = await res.json();
+      if (data.success && data.enriched) {
+        // Update local state with real data
+        const updated: Lead = {
+          ...lead,
+          email: data.email ?? lead.email,
+          company_context: data.company_context ?? lead.company_context,
+        };
+        setSelectedLead(updated);
+        // Also update the leads list so the dropdown shows the real email
+        setLeads((prev) => prev.map((l) => (l.id === lead.id ? updated : l)));
+        setEnriched(true);
+        if (data.email && data.email !== lead.email) {
+          toast.success(`Found real email: ${data.email}`);
+        }
+      } else {
+        // No enrichment found — keep original data, still usable
+        setEnriched(false);
+      }
+    } catch {
+      // Silent fail — enrichment is best-effort
+    } finally {
+      setIsEnriching(false);
+    }
   };
 
   /** Send the current single email via SMTP through /api/send-email */
@@ -847,6 +897,7 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
                         setSelectedLead(lead);
                         setLeadDropdownOpen(false);
                         setGeneratedEmail(null);
+                        enrichLead(lead);
                       }}
                     >
                       <p className="text-sm font-medium" style={{ color: "#111827", fontFamily: "Poppins, sans-serif" }}>
@@ -930,6 +981,26 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
                   {selectedLead.company_context}
                 </p>
               )}
+              {/* Enrichment status */}
+              <div className="flex items-center gap-2 mt-2">
+                {isEnriching && (
+                  <span className="flex items-center gap-1 text-[10px]" style={{ color: "#F5A623" }}>
+                    <Loader2 size={10} className="animate-spin" />
+                    Researching company website…
+                  </span>
+                )}
+                {!isEnriching && enriched && (
+                  <span className="flex items-center gap-1 text-[10px]" style={{ color: "#00E87A" }}>
+                    <CheckCircle size={10} />
+                    Real data found — email will be personalised
+                  </span>
+                )}
+                {!isEnriching && !enriched && selectedLead && (
+                  <span className="flex items-center gap-1 text-[10px]" style={{ color: "#888" }}>
+                    Using scraped data — add website URL for better results
+                  </span>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -955,7 +1026,7 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
       {/* Generate button */}
       <button
         onClick={generateEmail}
-        disabled={isGenerating || !selectedLead}
+        disabled={isGenerating || !selectedLead || isEnriching}
         className="flex items-center justify-center gap-2 py-3 rounded-xl text-sm font-semibold transition-all disabled:opacity-40"
         style={{
           background: "#2563EB",
