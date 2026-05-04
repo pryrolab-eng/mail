@@ -775,13 +775,25 @@ export const sendBulkEmailsChunkedAction = async (
           if (result.success) {
             results.sent++;
             chunkResults.sent++;
+
+            // Resolve smtp_account UUID from the email address that was used
+            let smtpAccountId: string | null = null;
+            if (result.accountUsed) {
+              const { data: smtpAccount } = await supabase
+                .from('smtp_accounts')
+                .select('id')
+                .eq('user_id', userId)
+                .eq('email', result.accountUsed)
+                .single();
+              smtpAccountId = smtpAccount?.id ?? null;
+            }
             
             // Log successful send
             await supabase.from('email_queue').insert({
               user_id: userId,
               campaign_id: campaignId,
               lead_id: email.lead_id,
-              smtp_account_id: result.accountUsed,
+              smtp_account_id: smtpAccountId,
               recipient_email: email.lead_email,
               recipient_name: email.company_name,
               subject: email.subject,

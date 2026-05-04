@@ -94,7 +94,8 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
   const [isCopied, setIsCopied] = useState(false);
   const [leadDropdownOpen, setLeadDropdownOpen] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
-  
+  const [isSendingSingle, setIsSendingSingle] = useState(false);
+
   // Bulk email generation states
   const [bulkMode, setBulkMode] = useState(false);
   const [selectedLeadIds, setSelectedLeadIds] = useState<Set<string>>(new Set());
@@ -220,6 +221,58 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
       toast.error("Failed to save email");
     }
     setIsSaving(false);
+  };
+
+  /** Send the current single email via SMTP through /api/send-email */
+  const sendSingleEmail = async () => {
+    if (!generatedEmail || !selectedLead) return;
+    if (!selectedLead.email) {
+      toast.error("This lead has no email address");
+      return;
+    }
+
+    setIsSendingSingle(true);
+    try {
+      const res = await fetch("/api/send-email", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          leadId: selectedLead.id,
+          to: selectedLead.email,
+          subject: editSubject || generatedEmail.subject,
+          body: editBody || generatedEmail.body,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (data.success) {
+        toast.success(`Email sent to ${selectedLead.email} via ${data.accountUsed}`);
+        // Optimistically update lead status in local state
+        setSelectedLead({ ...selectedLead, status: "Email Sent" });
+        // Also save to generated_emails for history
+        await supabase.from("generated_emails").insert({
+          user_id: userId,
+          lead_id: selectedLead.id,
+          subject: editSubject || generatedEmail.subject,
+          body: editBody || generatedEmail.body,
+          tone,
+          model_used: generatedEmail.model,
+        });
+      } else {
+        if (res.status === 429) {
+          toast.error("Daily SMTP limit reached. Add more accounts or try tomorrow.");
+        } else if (res.status === 404) {
+          toast.error("No SMTP accounts configured. Add one in SMTP Manager first.");
+        } else {
+          toast.error(data.error || "Failed to send email");
+        }
+      }
+    } catch (err) {
+      toast.error("Network error — could not reach send endpoint");
+    } finally {
+      setIsSendingSingle(false);
+    }
   };
 
   // Bulk email generation functions
@@ -1058,6 +1111,16 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
             >
               <Send size={12} />
               Copy & Mark Sent
+            </button>
+            <button
+              onClick={sendSingleEmail}
+              disabled={isSendingSingle || !selectedLead?.email}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              style={{ background: "rgba(37,99,235,0.1)", border: "1px solid rgba(37,99,235,0.35)", color: "#2563EB" }}
+              title={!selectedLead?.email ? "Lead has no email address" : "Send via your SMTP account"}
+            >
+              {isSendingSingle ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />}
+              {isSendingSingle ? "Sending…" : "Send via SMTP"}
             </button>
           </div>
         </div>

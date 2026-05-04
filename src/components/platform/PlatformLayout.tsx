@@ -22,6 +22,7 @@ export default function PlatformLayout({ userId, userEmail }: PlatformLayoutProp
   const [activeModule, setActiveModule] = useState<ActiveModule>("scraper");
   const [preloadedLead, setPreloadedLead] = useState<Lead | null>(null);
   const [crmRefreshKey, setCrmRefreshKey] = useState(0);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const router = useRouter();
   const supabase = createClient();
 
@@ -32,7 +33,6 @@ export default function PlatformLayout({ userId, userEmail }: PlatformLayoutProp
 
   const handleGenerateEmailFromScraper = (leads: ScrapedLead[]) => {
     if (leads.length > 0) {
-      // Convert scraped lead to a partial Lead object for the email writer
       const lead = leads[0];
       setPreloadedLead({
         id: "temp-" + Date.now(),
@@ -60,11 +60,29 @@ export default function PlatformLayout({ userId, userEmail }: PlatformLayoutProp
     setCrmRefreshKey((k) => k + 1);
   };
 
+  const handleModuleChange = (module: ActiveModule) => {
+    setActiveModule(module);
+    setSidebarOpen(false);
+  };
+
   return (
     <div className="flex h-screen overflow-hidden bg-gray-50">
+      {/* Mobile overlay */}
+      {sidebarOpen && (
+        <div
+          className="fixed inset-0 bg-black/40 z-20 lg:hidden"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+
       {/* Sidebar */}
-      <div className="relative z-10">
-        <PlatformSidebar activeModule={activeModule} onModuleChange={setActiveModule} />
+      <div
+        className={`
+          fixed lg:relative z-30 lg:z-10 h-full transition-transform duration-300
+          ${sidebarOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"}
+        `}
+      >
+        <PlatformSidebar activeModule={activeModule} onModuleChange={handleModuleChange} />
       </div>
 
       {/* Main content area */}
@@ -73,6 +91,7 @@ export default function PlatformLayout({ userId, userEmail }: PlatformLayoutProp
           activeModule={activeModule}
           userEmail={userEmail}
           onLogout={handleLogout}
+          onMenuToggle={() => setSidebarOpen(!sidebarOpen)}
         />
 
         <main className="flex-1 overflow-y-auto bg-white">

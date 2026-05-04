@@ -2,8 +2,9 @@
 
 import { useState } from "react";
 import { Mail, Send, Loader2, CheckCircle, XCircle, Clock, Zap } from "lucide-react";
-import { generateBulkEmailsAction, sendBulkEmailsChunkedAction } from "@/app/actions";
+import { generateBulkEmailsAction } from "@/app/actions";
 import { toast } from "sonner";
+import type { SendBulkResponse } from "@/app/api/send-bulk/route";
 
 interface BulkEmailSenderProps {
   userId: string;
@@ -62,27 +63,41 @@ export default function BulkEmailSender({ userId, selectedLeads, onComplete }: B
     setSendingProgress({ sent: 0, total: generatedEmails.length, chunk: 0 });
 
     try {
-      const result = await sendBulkEmailsChunkedAction(
-        userId,
-        generatedEmails,
-        {
-          chunkSize: 100,
-          delayBetweenEmails: 2000,
-          verifyEmails: true
-        }
-      );
+      const res = await fetch("/api/send-bulk", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          emails: generatedEmails.map((e) => ({
+            leadId: e.lead_id,
+            to: e.lead_email,
+            companyName: e.company_name,
+            subject: e.subject,
+            body: e.body,
+          })),
+          delayMs: 1500,
+          verifyEmails: true,
+        }),
+      });
 
-      if (result.success) {
-        setResults(result.results);
+      const data: SendBulkResponse = await res.json();
+
+      if (data.success && data.results) {
+        setResults(data.results);
         setStep('complete');
-        toast.success(result.message);
+        toast.success(
+          `Sent ${data.results.sent}/${data.results.total} emails. ${data.results.queued} queued. ${data.results.failed} failed.`
+        );
         onComplete?.();
       } else {
-        toast.error(result.error || 'Failed to send emails');
+        if (res.status === 429) {
+          toast.error("Daily SMTP limit reached. Add more accounts or try tomorrow.");
+        } else {
+          toast.error(data.error || 'Failed to send emails');
+        }
         setStep('preview');
       }
     } catch (error) {
-      toast.error('An error occurred while sending');
+      toast.error('Network error — could not reach send endpoint');
       setStep('preview');
     }
   };
