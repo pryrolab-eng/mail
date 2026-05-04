@@ -4,7 +4,7 @@ import { createServiceClient } from "../../../../supabase/service";
 import { SMTPManager } from "@/utils/smtp-server";
 
 export interface SendEmailRequest {
-  leadId: string;
+  leadId?: string;  // Optional — not required for manual sends
   to: string;
   subject: string;
   body: string;
@@ -39,9 +39,9 @@ export async function POST(request: NextRequest) {
     const { leadId, to, subject, body: emailBody, campaignId } = body;
 
     // Validate required fields
-    if (!leadId || !to || !subject || !emailBody) {
+    if (!to || !subject || !emailBody) {
       return NextResponse.json(
-        { success: false, error: "Missing required fields: leadId, to, subject, body" },
+        { success: false, error: "Missing required fields: to, subject, body" },
         { status: 400 }
       );
     }
@@ -55,20 +55,25 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Verify the lead belongs to this user
+    // If leadId provided, verify the lead belongs to this user
     const serviceSupabase = createServiceClient();
-    const { data: lead, error: leadError } = await serviceSupabase
-      .from("leads")
-      .select("id, company_name, status")
-      .eq("id", leadId)
-      .eq("user_id", user.id)
-      .single();
+    let lead: { id: string; company_name: string; status: string } | null = null;
 
-    if (leadError || !lead) {
-      return NextResponse.json(
-        { success: false, error: "Lead not found or access denied" },
-        { status: 404 }
-      );
+    if (leadId) {
+      const { data: leadData, error: leadError } = await serviceSupabase
+        .from("leads")
+        .select("id, company_name, status")
+        .eq("id", leadId)
+        .eq("user_id", user.id)
+        .single();
+
+      if (leadError || !leadData) {
+        return NextResponse.json(
+          { success: false, error: "Lead not found or access denied" },
+          { status: 404 }
+        );
+      }
+      lead = leadData;
     }
 
     // Load SMTP accounts and send
@@ -112,7 +117,7 @@ export async function POST(request: NextRequest) {
       .from("sent_emails")
       .insert({
         user_id: user.id,
-        lead_id: leadId,
+        lead_id: leadId ?? null,
         campaign_id: campaignId ?? null,
         subject,
         body: emailBody,
@@ -127,16 +132,16 @@ export async function POST(request: NextRequest) {
       console.error("Failed to log sent email:", insertError);
     }
 
-    // Update lead status to "Email Sent" if it's still "New"
-    if (lead.status === "New") {
+    // Update lead status to "Email Sent" if it's still "New" (only when a lead is linked)
+    if (lead && lead.status === "New") {
       await serviceSupabase
         .from("leads")
         .update({ status: "Email Sent", updated_at: new Date().toISOString() })
-        .eq("id", leadId);
+        .eq("id", lead.id);
 
       // Log status history
       await serviceSupabase.from("lead_status_history").insert({
-        lead_id: leadId,
+        lead_id: lead.id,
         old_status: lead.status,
         new_status: "Email Sent",
       });

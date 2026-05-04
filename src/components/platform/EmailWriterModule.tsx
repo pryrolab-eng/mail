@@ -16,6 +16,8 @@ import {
   CheckSquare,
   ChevronLeft,
   ChevronRight,
+  X,
+  AtSign,
 } from "lucide-react";
 import { createClient } from "../../../supabase/client";
 import { toast } from "sonner";
@@ -97,6 +99,11 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
   const [isSendingSingle, setIsSendingSingle] = useState(false);
   const [isEnriching, setIsEnriching] = useState(false);
   const [enriched, setEnriched] = useState(false);
+
+  // Manual send modal state
+  const [showManualSendModal, setShowManualSendModal] = useState(false);
+  const [manualEmail, setManualEmail] = useState("");
+  const [isSendingManual, setIsSendingManual] = useState(false);
 
   // Bulk email generation states
   const [bulkMode, setBulkMode] = useState(false);
@@ -322,6 +329,50 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
       toast.error("Network error — could not reach send endpoint");
     } finally {
       setIsSendingSingle(false);
+    }
+  };
+
+  /** Send the current email to a manually entered address (no lead required) */
+  const sendManualEmail = async () => {
+    if (!generatedEmail) return;
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(manualEmail)) {
+      toast.error("Please enter a valid email address");
+      return;
+    }
+
+    setIsSendingManual(true);
+    try {
+      const res = await fetch("/api/send-email", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          to: manualEmail,
+          subject: editSubject || generatedEmail.subject,
+          body: editBody || generatedEmail.body,
+          // leadId intentionally omitted — this is a manual send
+        }),
+      });
+
+      const data = await res.json();
+
+      if (data.success) {
+        toast.success(`Email sent to ${manualEmail} via ${data.accountUsed}`);
+        setShowManualSendModal(false);
+        setManualEmail("");
+      } else {
+        if (res.status === 429) {
+          toast.error("Daily SMTP limit reached. Add more accounts or try tomorrow.");
+        } else if (res.status === 404) {
+          toast.error("No SMTP accounts configured. Add one in SMTP Manager first.");
+        } else {
+          toast.error(data.error || "Failed to send email");
+        }
+      }
+    } catch (err) {
+      toast.error("Network error — could not reach send endpoint");
+    } finally {
+      setIsSendingManual(false);
     }
   };
 
@@ -1194,6 +1245,104 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
               {isSendingSingle ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />}
               {isSendingSingle ? "Sending…" : "Send via SMTP"}
             </button>
+            <button
+              onClick={() => setShowManualSendModal(true)}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium transition-all"
+              style={{ background: "rgba(168,85,247,0.1)", border: "1px solid rgba(168,85,247,0.35)", color: "#a855f7" }}
+              title="Send to any email address you enter manually"
+            >
+              <AtSign size={12} />
+              Send to Any Email
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Manual Send Modal */}
+      {showManualSendModal && generatedEmail && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.6)" }}>
+          <div className="w-full max-w-md rounded-2xl overflow-hidden shadow-2xl" style={{ background: "#1a1d24", border: "1px solid #2A2D35" }}>
+            {/* Modal header */}
+            <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: "1px solid #2A2D35" }}>
+              <div className="flex items-center gap-2">
+                <AtSign size={16} style={{ color: "#a855f7" }} />
+                <span className="text-sm font-semibold" style={{ color: "#e8eaed", fontFamily: "Poppins, sans-serif" }}>
+                  Send to Custom Email
+                </span>
+              </div>
+              <button
+                onClick={() => { setShowManualSendModal(false); setManualEmail(""); }}
+                className="p-1 rounded-lg transition-colors hover:bg-white/10"
+              >
+                <X size={16} style={{ color: "#666" }} />
+              </button>
+            </div>
+
+            {/* Modal body */}
+            <div className="p-5 flex flex-col gap-4">
+              <p className="text-xs" style={{ color: "#888", fontFamily: "Poppins, sans-serif" }}>
+                Send this email to any address — not just leads in your CRM. The email will be sent via your configured SMTP account.
+              </p>
+
+              {/* Email preview summary */}
+              <div className="rounded-xl p-3" style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #2A2D35" }}>
+                <p className="text-[10px] uppercase tracking-widest mb-1" style={{ color: "#666", fontFamily: "JetBrains Mono, monospace" }}>Subject</p>
+                <p className="text-xs font-medium" style={{ color: "#e8eaed", fontFamily: "Space Grotesk, sans-serif" }}>
+                  {editSubject || generatedEmail.subject}
+                </p>
+              </div>
+
+              {/* Recipient input */}
+              <div>
+                <label className="block text-[10px] uppercase tracking-widest mb-2" style={{ color: "#94a3b8", fontFamily: "JetBrains Mono, monospace" }}>
+                  Recipient Email Address
+                </label>
+                <input
+                  type="email"
+                  value={manualEmail}
+                  onChange={(e) => setManualEmail(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") sendManualEmail(); }}
+                  placeholder="e.g. john@company.com"
+                  autoFocus
+                  className="w-full px-4 py-3 rounded-xl text-sm outline-none transition-all"
+                  style={{
+                    background: "rgba(255,255,255,0.07)",
+                    border: "1px solid #3A3D45",
+                    color: "#f1f5f9",
+                    fontFamily: "Space Grotesk, sans-serif",
+                  }}
+                />
+              </div>
+
+              {/* Actions */}
+              <div className="flex items-center gap-3 pt-1">
+                <button
+                  onClick={() => { setShowManualSendModal(false); setManualEmail(""); }}
+                  className="flex-1 py-2.5 rounded-xl text-sm font-medium transition-all"
+                  style={{ background: "rgba(255,255,255,0.05)", border: "1px solid #2A2D35", color: "#888" }}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={sendManualEmail}
+                  disabled={isSendingManual || !manualEmail}
+                  className="flex-1 py-2.5 rounded-xl text-sm font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                  style={{ background: "#a855f7", border: "1px solid #a855f7", color: "#fff" }}
+                >
+                  {isSendingManual ? (
+                    <>
+                      <Loader2 size={14} className="animate-spin" />
+                      Sending…
+                    </>
+                  ) : (
+                    <>
+                      <Send size={14} />
+                      Send Email
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}
