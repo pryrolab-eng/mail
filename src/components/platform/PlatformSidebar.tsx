@@ -1,12 +1,14 @@
 "use client";
 
 import { ActiveModule } from "@/types/platform";
-import { Radio, Mail, Settings, Layout, Zap, Server, Send } from "lucide-react";
-import Image from "next/image";
+import { Radio, Mail, Settings, Layout, Zap, Server, Send, CreditCard } from "lucide-react";
+import Link from "next/link";
+import { useSubscription } from "@/hooks/useSubscription";
 
 interface SidebarProps {
   activeModule: ActiveModule;
   onModuleChange: (module: ActiveModule) => void;
+  userId: string;
 }
 
 const navItems = [

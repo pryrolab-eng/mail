@@ -3,6 +3,10 @@
     {
       "path": "/api/followup/process",
       "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/inbox/check",
+      "schedule": "*/15 * * * *"
     }
   ]
 }
