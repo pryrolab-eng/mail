@@ -981,7 +981,7 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
       {generatedEmail && (
         <div
           className="flex-1 rounded-xl overflow-hidden"
-          style={{ border: "1px solid #2A2D35" }}
+          style={{ border: "1px solid #2A2D35", background: "#13161e" }}
         >
           {/* Email header */}
           <div
@@ -1016,7 +1016,7 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
           <div className="p-4 flex flex-col gap-3">
             {/* Subject */}
             <div>
-              <label className="block text-[9px] uppercase tracking-widest mb-1.5" style={{ color: "#000000", fontFamily: "JetBrains Mono, monospace" }}>
+              <label className="block text-[9px] uppercase tracking-widest mb-1.5" style={{ color: "#94a3b8", fontFamily: "JetBrains Mono, monospace" }}>
                 Subject
               </label>
               {isEditing ? (
@@ -1026,14 +1026,14 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
                   onChange={(e) => setEditSubject(e.target.value)}
                   className="w-full px-3 py-2 rounded-lg text-sm outline-none"
                   style={{
-                    background: "rgba(255,255,255,0.04)",
-                    border: "1px solid #2A2D35",
-                    color: "#e8eaed",
+                    background: "rgba(255,255,255,0.07)",
+                    border: "1px solid #3A3D45",
+                    color: "#f1f5f9",
                     fontFamily: "Space Grotesk, sans-serif",
                   }}
                 />
               ) : (
-                <p className="text-sm font-medium px-3 py-2 rounded-lg" style={{ color: "#e8eaed", background: "rgba(255,255,255,0.02)", fontFamily: "Space Grotesk, sans-serif" }}>
+                <p className="text-sm font-semibold px-3 py-2 rounded-lg" style={{ color: "#f1f5f9", background: "rgba(255,255,255,0.05)", fontFamily: "Space Grotesk, sans-serif" }}>
                   {editSubject || generatedEmail.subject}
                 </p>
               )}
@@ -1041,7 +1041,7 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
 
             {/* Body */}
             <div>
-              <label className="block text-[9px] uppercase tracking-widest mb-1.5" style={{ color: "#000000", fontFamily: "JetBrains Mono, monospace" }}>
+              <label className="block text-[9px] uppercase tracking-widest mb-1.5" style={{ color: "#94a3b8", fontFamily: "JetBrains Mono, monospace" }}>
                 Body
               </label>
               {isEditing ? (
@@ -1051,9 +1051,9 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
                   rows={8}
                   className="w-full px-3 py-2 rounded-lg text-sm outline-none resize-none"
                   style={{
-                    background: "rgba(255,255,255,0.04)",
-                    border: "1px solid #2A2D35",
-                    color: "#ccc",
+                    background: "rgba(255,255,255,0.07)",
+                    border: "1px solid #3A3D45",
+                    color: "#e2e8f0",
                     fontFamily: "JetBrains Mono, monospace",
                     lineHeight: "1.7",
                   }}
@@ -1062,10 +1062,11 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
                 <pre
                   className="text-xs px-3 py-3 rounded-lg whitespace-pre-wrap leading-relaxed"
                   style={{
-                    background: "rgba(255,255,255,0.02)",
-                    color: "#aaa",
+                    background: "rgba(255,255,255,0.05)",
+                    color: "#e2e8f0",
                     fontFamily: "JetBrains Mono, monospace",
                     lineHeight: "1.7",
+                    border: "1px solid rgba(255,255,255,0.06)",
                   }}
                 >
                   {editBody || generatedEmail.body}
