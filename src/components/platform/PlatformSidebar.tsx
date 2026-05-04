@@ -20,7 +20,10 @@ const navItems = [
   { id: "ai-settings" as ActiveModule, label: "AI Settings", icon: Settings },
 ];
 
-export default function PlatformSidebar({ activeModule, onModuleChange }: SidebarProps) {
+export default function PlatformSidebar({ activeModule, onModuleChange, userId }: SidebarProps) {
+  const { subscription, loading: subLoading } = useSubscription(userId);
+  const plan = subscription?.plan ?? "free";
+  const planLabel = plan.charAt(0).toUpperCase() + plan.slice(1);
   return (
     <aside
       className="w-[200px] flex-shrink-0 flex flex-col bg-white border-r border-gray-200 h-full"
@@ -60,7 +63,22 @@ export default function PlatformSidebar({ activeModule, onModuleChange }: Sideba
       </nav>
 
       {/* Bottom status */}
-      <div className="p-3 border-t border-gray-200">
+      <div className="p-3 border-t border-gray-200 space-y-2">
+        {/* Plan badge */}
+        <Link
+          href="/pricing"
+          className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-gray-100 transition-colors group"
+        >
+          <CreditCard size={14} className="text-gray-400 group-hover:text-blue-600 transition-colors" />
+          <span className="text-xs text-gray-500 group-hover:text-gray-700 transition-colors">
+            {subLoading ? "…" : `${planLabel} plan`}
+          </span>
+          {plan === "free" && (
+            <span className="ml-auto text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-600 font-medium">
+              Upgrade
+            </span>
+          )}
+        </Link>
         <div className="flex items-center gap-2 px-2 py-1.5">
           <div className="w-2 h-2 rounded-full bg-green-500 flex-shrink-0" />
           <span className="text-xs text-gray-500">CONNECTED</span>
