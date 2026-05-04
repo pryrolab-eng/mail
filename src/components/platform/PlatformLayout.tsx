@@ -82,7 +82,7 @@ export default function PlatformLayout({ userId, userEmail }: PlatformLayoutProp
           ${sidebarOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"}
         `}
       >
-        <PlatformSidebar activeModule={activeModule} onModuleChange={handleModuleChange} userId={userId} />
+        <PlatformSidebar activeModule={activeModule} onModuleChange={handleModuleChange} />
       </div>
 
       {/* Main content area */}

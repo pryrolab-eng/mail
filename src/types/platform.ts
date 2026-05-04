@@ -48,7 +48,7 @@ export interface ScrapedLead {
   company_context: string;
 }
 
-export type ActiveModule = 'scraper' | 'email-writer' | 'crm' | 'ai-settings' | 'smtp-manager' | 'follow-up' | 'billing';
+export type ActiveModule = 'scraper' | 'email-writer' | 'crm' | 'ai-settings' | 'smtp-manager' | 'follow-up';
 
 export type ToneType = 'Direct' | 'Aggressive' | 'Surgical';
 

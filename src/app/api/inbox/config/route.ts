@@ -1,14 +1,13 @@
 /**
  * /api/inbox/config
  *
- * GET  — list all inbox configs for the user
- * POST — add or update an inbox config (IMAP credentials)
- * DELETE ?id=<uuid> — remove an inbox config
+ * GET    — list all inbox configs for the user
+ * POST   — add or update an inbox config (IMAP credentials)
+ * DELETE — ?id=<uuid> remove an inbox config
  */
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "../../../../../supabase/server";
 import { createServiceClient } from "../../../../../supabase/service";
-import { canAccess } from "@/lib/plans";
 
 export async function GET() {
   try {
@@ -31,7 +30,10 @@ export async function GET() {
     return NextResponse.json({ success: true, configs: data ?? [] });
   } catch (err) {
     console.error("[GET /api/inbox/config]", err);
-    return NextResponse.json({ error: err instanceof Error ? err.message : "Internal error" }, { status: 500 });
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Internal error" },
+      { status: 500 }
+    );
   }
 }
 
@@ -43,21 +45,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    // Check plan — inbox monitoring requires starter+
     const service = createServiceClient();
-    const { data: sub } = await service
-      .from("subscriptions")
-      .select("plan")
-      .eq("user_id", user.id)
-      .single();
-
-    if (!canAccess(sub?.plan ?? "free", "inboxMonitoring")) {
-      return NextResponse.json(
-        { error: "Inbox monitoring requires a Starter plan or higher. Upgrade to continue." },
-        { status: 403 }
-      );
-    }
-
     const body = await request.json();
     const {
       email_address,
@@ -86,7 +74,7 @@ export async function POST(request: NextRequest) {
           imap_host,
           imap_port,
           imap_username,
-          imap_password,   // stored as-is; encrypt in production
+          imap_password,
           auto_reply_enabled,
           is_active: true,
           updated_at: new Date().toISOString(),
@@ -101,7 +89,10 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ success: true, config: data });
   } catch (err) {
     console.error("[POST /api/inbox/config]", err);
-    return NextResponse.json({ error: err instanceof Error ? err.message : "Internal error" }, { status: 500 });
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Internal error" },
+      { status: 500 }
+    );
   }
 }
 
@@ -130,6 +121,9 @@ export async function DELETE(request: NextRequest) {
     return NextResponse.json({ success: true });
   } catch (err) {
     console.error("[DELETE /api/inbox/config]", err);
-    return NextResponse.json({ error: err instanceof Error ? err.message : "Internal error" }, { status: 500 });
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Internal error" },
+      { status: 500 }
+    );
   }
 }
