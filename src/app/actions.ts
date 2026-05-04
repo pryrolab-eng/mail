@@ -168,15 +168,16 @@ export const signOutAction = async () => {
   return redirect("/sign-in");
 };
 
-export const scrapeLeadsAction = async (niche: string, location: string) => {
+export const scrapeLeadsAction = async (niche: string, location: string, maxResults: number = 100) => {
   try {
     console.log('=== Starting Lead Scraping ===');
     console.log('Niche:', niche);
     console.log('Location:', location);
+    console.log('Max Results:', maxResults);
     
     // Method 1: Try Puppeteer scraping (no API needed, most accurate)
     console.log('Attempting Puppeteer scraping (Google Maps, Yelp, Yellow Pages)...');
-    const puppeteerLeads = await scrapeWithoutAPI(niche, location, 1000);
+    const puppeteerLeads = await scrapeWithoutAPI(niche, location, maxResults);
     
     if (puppeteerLeads.length > 0) {
       console.log(`✓ Puppeteer scraping successful: ${puppeteerLeads.length} leads found`);
@@ -222,7 +223,7 @@ export const scrapeLeadsAction = async (niche: string, location: string) => {
     // Method 3: Generate fallback leads
     console.log('Generating fallback leads...');
     const { generateFallbackLeads } = await import('@/utils/advanced-scraper');
-    const fallbackLeads = await generateFallbackLeads(niche, location, 15);
+    const fallbackLeads = await generateFallbackLeads(niche, location, Math.min(maxResults, 50));
     
     console.log(`✓ Generated ${fallbackLeads.length} fallback leads`);
     
