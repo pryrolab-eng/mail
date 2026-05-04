@@ -94,7 +94,10 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
   const [isCopied, setIsCopied] = useState(false);
   const [leadDropdownOpen, setLeadDropdownOpen] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
-  
+  const [isSendingSingle, setIsSendingSingle] = useState(false);
+  const [isEnriching, setIsEnriching] = useState(false);
+  const [enriched, setEnriched] = useState(false);
+
   // Bulk email generation states
   const [bulkMode, setBulkMode] = useState(false);
   const [selectedLeadIds, setSelectedLeadIds] = useState<Set<string>>(new Set());
@@ -113,7 +116,10 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
   }, []);
 
   useEffect(() => {
-    if (preloadedLead) setSelectedLead(preloadedLead);
+    if (preloadedLead) {
+      setSelectedLead(preloadedLead);
+      enrichLead(preloadedLead);
+    }
   }, [preloadedLead]);
 
   const fetchLeads = async () => {
@@ -220,6 +226,103 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
       toast.error("Failed to save email");
     }
     setIsSaving(false);
+  };
+
+  /**
+   * Enrich a lead: visit their website, find real email, build real context.
+   * Fires automatically when a lead is selected from the dropdown.
+   */
+  const enrichLead = async (lead: Lead) => {
+    setIsEnriching(true);
+    setEnriched(false);
+    try {
+      const res = await fetch("/api/enrich-lead", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          leadId: lead.id,
+          companyName: lead.company_name,
+          website: (lead as any).website || null,
+          niche: lead.niche || "",
+          location: lead.location || "",
+        }),
+      });
+      const data = await res.json();
+      if (data.success && data.enriched) {
+        // Update local state with real data
+        const updated: Lead = {
+          ...lead,
+          email: data.email ?? lead.email,
+          company_context: data.company_context ?? lead.company_context,
+        };
+        setSelectedLead(updated);
+        // Also update the leads list so the dropdown shows the real email
+        setLeads((prev) => prev.map((l) => (l.id === lead.id ? updated : l)));
+        setEnriched(true);
+        if (data.email && data.email !== lead.email) {
+          toast.success(`Found real email: ${data.email}`);
+        }
+      } else {
+        // No enrichment found — keep original data, still usable
+        setEnriched(false);
+      }
+    } catch {
+      // Silent fail — enrichment is best-effort
+    } finally {
+      setIsEnriching(false);
+    }
+  };
+
+  /** Send the current single email via SMTP through /api/send-email */
+  const sendSingleEmail = async () => {
+    if (!generatedEmail || !selectedLead) return;
+    if (!selectedLead.email) {
+      toast.error("This lead has no email address");
+      return;
+    }
+
+    setIsSendingSingle(true);
+    try {
+      const res = await fetch("/api/send-email", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          leadId: selectedLead.id,
+          to: selectedLead.email,
+          subject: editSubject || generatedEmail.subject,
+          body: editBody || generatedEmail.body,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (data.success) {
+        toast.success(`Email sent to ${selectedLead.email} via ${data.accountUsed}`);
+        // Optimistically update lead status in local state
+        setSelectedLead({ ...selectedLead, status: "Email Sent" });
+        // Also save to generated_emails for history
+        await supabase.from("generated_emails").insert({
+          user_id: userId,
+          lead_id: selectedLead.id,
+          subject: editSubject || generatedEmail.subject,
+          body: editBody || generatedEmail.body,
+          tone,
+          model_used: generatedEmail.model,
+        });
+      } else {
+        if (res.status === 429) {
+          toast.error("Daily SMTP limit reached. Add more accounts or try tomorrow.");
+        } else if (res.status === 404) {
+          toast.error("No SMTP accounts configured. Add one in SMTP Manager first.");
+        } else {
+          toast.error(data.error || "Failed to send email");
+        }
+      }
+    } catch (err) {
+      toast.error("Network error — could not reach send endpoint");
+    } finally {
+      setIsSendingSingle(false);
+    }
   };
 
   // Bulk email generation functions
@@ -794,6 +897,7 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
                         setSelectedLead(lead);
                         setLeadDropdownOpen(false);
                         setGeneratedEmail(null);
+                        enrichLead(lead);
                       }}
                     >
                       <p className="text-sm font-medium" style={{ color: "#111827", fontFamily: "Poppins, sans-serif" }}>
@@ -877,6 +981,26 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
                   {selectedLead.company_context}
                 </p>
               )}
+              {/* Enrichment status */}
+              <div className="flex items-center gap-2 mt-2">
+                {isEnriching && (
+                  <span className="flex items-center gap-1 text-[10px]" style={{ color: "#F5A623" }}>
+                    <Loader2 size={10} className="animate-spin" />
+                    Researching company website…
+                  </span>
+                )}
+                {!isEnriching && enriched && (
+                  <span className="flex items-center gap-1 text-[10px]" style={{ color: "#00E87A" }}>
+                    <CheckCircle size={10} />
+                    Real data found — email will be personalised
+                  </span>
+                )}
+                {!isEnriching && !enriched && selectedLead && (
+                  <span className="flex items-center gap-1 text-[10px]" style={{ color: "#888" }}>
+                    Using scraped data — add website URL for better results
+                  </span>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -902,7 +1026,7 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
       {/* Generate button */}
       <button
         onClick={generateEmail}
-        disabled={isGenerating || !selectedLead}
+        disabled={isGenerating || !selectedLead || isEnriching}
         className="flex items-center justify-center gap-2 py-3 rounded-xl text-sm font-semibold transition-all disabled:opacity-40"
         style={{
           background: "#2563EB",
@@ -928,7 +1052,7 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
       {generatedEmail && (
         <div
           className="flex-1 rounded-xl overflow-hidden"
-          style={{ border: "1px solid #2A2D35" }}
+          style={{ border: "1px solid #2A2D35", background: "#13161e" }}
         >
           {/* Email header */}
           <div
@@ -963,7 +1087,7 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
           <div className="p-4 flex flex-col gap-3">
             {/* Subject */}
             <div>
-              <label className="block text-[9px] uppercase tracking-widest mb-1.5" style={{ color: "#000000", fontFamily: "JetBrains Mono, monospace" }}>
+              <label className="block text-[9px] uppercase tracking-widest mb-1.5" style={{ color: "#94a3b8", fontFamily: "JetBrains Mono, monospace" }}>
                 Subject
               </label>
               {isEditing ? (
@@ -973,14 +1097,14 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
                   onChange={(e) => setEditSubject(e.target.value)}
                   className="w-full px-3 py-2 rounded-lg text-sm outline-none"
                   style={{
-                    background: "rgba(255,255,255,0.04)",
-                    border: "1px solid #2A2D35",
-                    color: "#e8eaed",
+                    background: "rgba(255,255,255,0.07)",
+                    border: "1px solid #3A3D45",
+                    color: "#f1f5f9",
                     fontFamily: "Space Grotesk, sans-serif",
                   }}
                 />
               ) : (
-                <p className="text-sm font-medium px-3 py-2 rounded-lg" style={{ color: "#e8eaed", background: "rgba(255,255,255,0.02)", fontFamily: "Space Grotesk, sans-serif" }}>
+                <p className="text-sm font-semibold px-3 py-2 rounded-lg" style={{ color: "#f1f5f9", background: "rgba(255,255,255,0.05)", fontFamily: "Space Grotesk, sans-serif" }}>
                   {editSubject || generatedEmail.subject}
                 </p>
               )}
@@ -988,7 +1112,7 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
 
             {/* Body */}
             <div>
-              <label className="block text-[9px] uppercase tracking-widest mb-1.5" style={{ color: "#000000", fontFamily: "JetBrains Mono, monospace" }}>
+              <label className="block text-[9px] uppercase tracking-widest mb-1.5" style={{ color: "#94a3b8", fontFamily: "JetBrains Mono, monospace" }}>
                 Body
               </label>
               {isEditing ? (
@@ -998,9 +1122,9 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
                   rows={8}
                   className="w-full px-3 py-2 rounded-lg text-sm outline-none resize-none"
                   style={{
-                    background: "rgba(255,255,255,0.04)",
-                    border: "1px solid #2A2D35",
-                    color: "#ccc",
+                    background: "rgba(255,255,255,0.07)",
+                    border: "1px solid #3A3D45",
+                    color: "#e2e8f0",
                     fontFamily: "JetBrains Mono, monospace",
                     lineHeight: "1.7",
                   }}
@@ -1009,10 +1133,11 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
                 <pre
                   className="text-xs px-3 py-3 rounded-lg whitespace-pre-wrap leading-relaxed"
                   style={{
-                    background: "rgba(255,255,255,0.02)",
-                    color: "#aaa",
+                    background: "rgba(255,255,255,0.05)",
+                    color: "#e2e8f0",
                     fontFamily: "JetBrains Mono, monospace",
                     lineHeight: "1.7",
+                    border: "1px solid rgba(255,255,255,0.06)",
                   }}
                 >
                   {editBody || generatedEmail.body}
@@ -1058,6 +1183,16 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
             >
               <Send size={12} />
               Copy & Mark Sent
+            </button>
+            <button
+              onClick={sendSingleEmail}
+              disabled={isSendingSingle || !selectedLead?.email}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              style={{ background: "rgba(37,99,235,0.1)", border: "1px solid rgba(37,99,235,0.35)", color: "#2563EB" }}
+              title={!selectedLead?.email ? "Lead has no email address" : "Send via your SMTP account"}
+            >
+              {isSendingSingle ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />}
+              {isSendingSingle ? "Sending…" : "Send via SMTP"}
             </button>
           </div>
         </div>

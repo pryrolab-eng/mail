@@ -1,8 +1,7 @@
 "use client";
 
 import { ActiveModule } from "@/types/platform";
-import { Radio, Mail, Settings, Layout, Zap, Server, Send } from "lucide-react";
-import Image from "next/image";
+import { Radio, Mail, Settings, Layout, Server, Send } from "lucide-react";
 
 interface SidebarProps {
   activeModule: ActiveModule;
@@ -20,22 +19,13 @@ const navItems = [
 
 export default function PlatformSidebar({ activeModule, onModuleChange }: SidebarProps) {
   return (
-    <aside
-      className="w-[72px] lg:w-[200px] flex-shrink-0 flex flex-col bg-white border-r border-gray-200"
-      style={{
-        height: "100vh",
-        position: "sticky",
-        top: 0,
-      }}
-    >
+    <aside className="w-[200px] flex-shrink-0 flex flex-col bg-white border-r border-gray-200 h-full">
       {/* Logo */}
-      <div className="flex items-end gap-4 px-4 py-5 border-b border-gray-200">
-        <span className="font-bold text-4xl" style={{ color: "#007FDE", fontFamily: "Arial, sans-serif" }}>
+      <div className="flex items-end gap-3 px-4 py-5 border-b border-gray-200">
+        <span className="font-bold text-3xl" style={{ color: "#007FDE", fontFamily: "Arial, sans-serif" }}>
           pryro
         </span>
-        <span className="hidden lg:block font-semibold text-sm text-gray-700 pb-1">
-          mail
-        </span>
+        <span className="font-semibold text-sm text-gray-700 pb-1">mail</span>
       </div>
 
       {/* Nav Items */}
@@ -56,9 +46,7 @@ export default function PlatformSidebar({ activeModule, onModuleChange }: Sideba
               `}
             >
               <Icon size={18} className="flex-shrink-0" />
-              <span className="hidden lg:block text-sm font-medium">
-                {item.label}
-              </span>
+              <span className="text-sm font-medium">{item.label}</span>
             </button>
           );
         })}
@@ -66,11 +54,9 @@ export default function PlatformSidebar({ activeModule, onModuleChange }: Sideba
 
       {/* Bottom status */}
       <div className="p-3 border-t border-gray-200">
-        <div className="hidden lg:flex items-center gap-2 px-2 py-1.5">
-          <div className="w-2 h-2 rounded-full bg-green-500" />
-          <span className="text-xs text-gray-500">
-            CONNECTED
-          </span>
+        <div className="flex items-center gap-2 px-2 py-1.5">
+          <div className="w-2 h-2 rounded-full bg-green-500 flex-shrink-0" />
+          <span className="text-xs text-gray-500">CONNECTED</span>
         </div>
       </div>
     </aside>
