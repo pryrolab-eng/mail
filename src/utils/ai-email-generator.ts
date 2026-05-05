@@ -32,39 +32,62 @@ export async function generateAIEmail(params: EmailGenerationParams): Promise<{ 
   
   // Build the prompt based on tone
   const toneInstructions = {
-    'Direct': 'Write a clear, concise, professional email. No fluff. Get straight to the point.',
-    'Aggressive': 'Write an urgent, compelling email that creates FOMO. Push for immediate action.',
-    'Surgical': 'Write a deeply personalized email showing you researched them. Reference specific details.'
+    'Direct': `Write a clear, direct, professional cold email. No filler words, no fluff. Every sentence must earn its place.
+- Open with a one-line observation about their business that shows you actually looked at them
+- State the specific problem they face in their industry (be concrete, not generic)
+- Explain exactly how ${yourService} solves that problem — include a specific mechanism or result
+- Close with a single, low-friction CTA (e.g., "Worth a 15-minute call this week?")
+- Aim for 180–220 words — long enough to be credible, short enough to be read`,
+
+    'Aggressive': `Write a high-urgency, pattern-interrupting cold email that creates genuine FOMO.
+- Open with a bold, provocative statement about a costly problem in their industry — make it feel personal
+- Quantify the pain: use realistic dollar amounts, percentages, or time wasted
+- Name-drop a result you've achieved for a similar company (use a plausible example if needed)
+- Create urgency: limited availability, a deadline, or a window they're about to miss
+- End with a direct, binary CTA: "Are you open to a 20-minute call this week — yes or no?"
+- Aim for 200–250 words — punchy paragraphs, no long blocks of text`,
+
+    'Surgical': `Write a hyper-personalized cold email that proves you did your homework on this specific company.
+- Open by referencing something specific from their company context — a recent initiative, their market position, or a detail from their website
+- Connect that specific detail to a challenge that naturally follows from it
+- Explain how ${yourService} addresses that exact challenge — be specific about the mechanism
+- Reference a comparable company or result to build credibility
+- Close with a thoughtful, consultative CTA that feels like a natural next step, not a sales push
+- Aim for 220–280 words — this is a relationship-building email, not a one-liner`
   };
-  
-  const prompt = `You are writing a cold outreach email for ${yourCompany}.
 
-YOUR COMPANY: ${yourCompany}
-YOUR SERVICE: ${yourService}
+  const companyContext = lead.company_context 
+    ? lead.company_context.slice(0, 800) 
+    : 'No additional context available';
 
-TARGET COMPANY: ${lead.company_name}
-INDUSTRY: ${lead.niche || 'Unknown'}
-LOCATION: ${lead.location || 'Unknown'}
-CONTEXT: ${lead.company_context || 'No additional context'}
+  const prompt = `You are an elite B2B cold email copywriter with a track record of 30%+ reply rates. You write emails that feel human, specific, and genuinely valuable — never spammy or templated.
 
-${customPainPoint ? `PAIN POINT TO ADDRESS: ${customPainPoint}` : ''}
+=== SENDER INFO ===
+Company: ${yourCompany}
+Service/Product: ${yourService}
 
-TONE: ${toneInstructions[tone]}
+=== TARGET COMPANY ===
+Company Name: ${lead.company_name}
+Industry/Niche: ${lead.niche || 'Unknown'}
+Location: ${lead.location || 'Unknown'}
+Company Context: ${companyContext}
 
-Write a cold email with:
-1. A compelling subject line (max 60 characters)
-2. Email body that:
-   - Opens with a personalized hook about their company
-   - States the problem they likely face
-   - Briefly explains how ${yourService} solves it
-   - Ends with a clear, low-friction call-to-action
-   - Keep it under 150 words
-   - Use their company name naturally
-   - Don't use placeholder text like [Your Name]
+${customPainPoint ? `=== SPECIFIC PAIN POINT TO ADDRESS ===\n${customPainPoint}\n` : ''}
 
-Format your response EXACTLY as:
-SUBJECT: [subject line here]
-BODY: [email body here]`;
+=== WRITING INSTRUCTIONS ===
+${toneInstructions[tone]}
+
+=== CRITICAL RULES ===
+- Never use placeholder text like [Your Name], [Company], [INSERT X HERE]
+- Never use generic openers like "I hope this email finds you well" or "My name is..."
+- Never make up specific metrics you can't back up — use ranges or "companies like yours"
+- The email must feel like it was written specifically for ${lead.company_name}, not copy-pasted
+- Sign off naturally without a name placeholder — end with just the CTA or a simple "Best,"
+- Do NOT include a signature block
+
+Format your response EXACTLY like this (no extra text before or after):
+SUBJECT: [subject line — max 65 characters, no quotes]
+BODY: [full email body]`;
 
   // Call AI API
   let aiResponse;
@@ -80,11 +103,11 @@ BODY: [email body here]`;
         body: JSON.stringify({
           model: aiProvider.active_model || "gpt-4o-mini",
           messages: [
-            { role: "system", content: "You are an expert cold email copywriter." },
+            { role: "system", content: "You are an elite B2B cold email copywriter. You write emails that feel human, specific, and genuinely valuable — never spammy or templated. Always follow the exact output format requested." },
             { role: "user", content: prompt }
           ],
-          temperature: 0.7,
-          max_tokens: 500
+          temperature: 0.75,
+          max_tokens: 900
         })
       });
       
@@ -105,7 +128,8 @@ BODY: [email body here]`;
         },
         body: JSON.stringify({
           model: aiProvider.active_model || "claude-3-5-sonnet-20241022",
-          max_tokens: 500,
+          max_tokens: 900,
+          system: "You are an elite B2B cold email copywriter. You write emails that feel human, specific, and genuinely valuable — never spammy or templated. Always follow the exact output format requested.",
           messages: [
             { role: "user", content: prompt }
           ]
@@ -137,11 +161,11 @@ BODY: [email body here]`;
         body: JSON.stringify({
           model: aiProvider.active_model || "llama-3.3-70b-versatile",
           messages: [
-            { role: "system", content: "You are an expert cold email copywriter." },
+            { role: "system", content: "You are an elite B2B cold email copywriter. You write emails that feel human, specific, and genuinely valuable — never spammy or templated. Always follow the exact output format requested." },
             { role: "user", content: prompt }
           ],
-          temperature: 0.7,
-          max_tokens: 500
+          temperature: 0.75,
+          max_tokens: 900
         })
       });
       
