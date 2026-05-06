@@ -17,7 +17,7 @@ interface EmailWriterProps {
 }
 
 const TONE_OPTIONS: { value: ToneType; label: string; desc: string; color: string }[] = [
-  { value: "Direct",    label: "Direct",    desc: "Clear, concise, professional — no fluff",              color: "#2563EB" },
+  { value: "Direct",    label: "Direct",    desc: "Hard direct. No politeness. Problem → Solution → CTA",              color: "#2563EB" },
   { value: "Aggressive",label: "Aggressive",desc: "High urgency, creates FOMO, pushes action hard",       color: "#DC2626" },
   { value: "Surgical",  label: "Surgical",  desc: "Hyper-personalized, proves you did your homework",     color: "#7C3AED" },
 ];
