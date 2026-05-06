@@ -25,7 +25,7 @@ export async function generateAIEmail(params: EmailGenerationParams): Promise<{ 
   if (!response.ok) {
     const error = await response.json();
     console.error("AI provider fetch error:", error);
-    throw new Error("No active AI provider configured. Please set up AI in Settings.");
+    throw new Error(error.error || "No active AI provider configured. Please set up AI in Settings.");
   }
   
   const aiProvider = await response.json();
@@ -144,14 +144,6 @@ BODY: [full email body]`;
       aiResponse = data.content[0].text;
       
     } else if (aiProvider.provider === "groq") {
-      console.log('=== GROQ API CALL ===');
-      console.log('Model:', aiProvider.active_model || "llama-3.3-70b-versatile");
-      console.log('API Key present:', !!aiProvider.api_key);
-      console.log('API Key length:', aiProvider.api_key?.length);
-      console.log('API Key prefix:', aiProvider.api_key?.substring(0, 10));
-      console.log('Prompt length:', prompt.length);
-      console.log('====================');
-      
       const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -175,30 +167,17 @@ BODY: [full email body]`;
         
         try {
           errorText = await response.text();
-          console.log('Raw error text from Groq:', errorText);
           
           if (errorText) {
             try {
               errorJson = JSON.parse(errorText);
-              console.log('Parsed error JSON:', JSON.stringify(errorJson, null, 2));
             } catch (parseError) {
-              console.log('Could not parse error as JSON');
+              // Not JSON, use text as-is
             }
           }
         } catch (e) {
           console.error('Error reading response text:', e);
         }
-        
-        // Log each piece separately for better visibility
-        console.error('=== GROQ API ERROR ===');
-        console.error('Status:', response.status);
-        console.error('Status Text:', response.statusText);
-        console.error('Error Text:', errorText);
-        console.error('Error JSON:', errorJson);
-        console.error('Response Headers:', Object.fromEntries(response.headers.entries()));
-        console.error('API Key (first 10 chars):', aiProvider.api_key?.substring(0, 10));
-        console.error('Model:', aiProvider.active_model || "llama-3.3-70b-versatile");
-        console.error('======================');
         
         // Build detailed error message
         let errorMessage = 'Unknown error';
@@ -206,18 +185,20 @@ BODY: [full email body]`;
         if (errorJson?.error?.message) {
           errorMessage = errorJson.error.message;
         } else if (errorText) {
-          errorMessage = errorText;
+          errorMessage = errorText.substring(0, 200); // Limit length
         } else if (response.statusText) {
           errorMessage = response.statusText;
         }
         
         // Add helpful context based on status code
         if (response.status === 401) {
-          errorMessage += ' - Check your Groq API key is valid';
+          throw new Error('Groq API authentication failed. Please check your API key in Settings.');
         } else if (response.status === 429) {
-          errorMessage += ' - Rate limit exceeded. Wait a moment and try again';
+          throw new Error('Groq rate limit exceeded. Please wait a moment and try again.');
         } else if (response.status === 404) {
-          errorMessage += ' - Model not found. Check the model name is correct';
+          throw new Error(`Groq model "${aiProvider.active_model || "llama-3.3-70b-versatile"}" not found. Please check the model name in Settings.`);
+        } else if (response.status === 400) {
+          throw new Error(`Groq API error: ${errorMessage}`);
         }
         
         throw new Error(`Groq API error (${response.status}): ${errorMessage}`);

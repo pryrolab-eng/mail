@@ -14,9 +14,11 @@ import {
   TrendingUp,
   Save,
   Clock,
+  Upload,
 } from "lucide-react";
 import { createClient } from "../../../supabase/client";
 import { toast } from "sonner";
+import CSVImportModal from "./CSVImportModal";
 
 interface CRMModuleProps {
   userId: string;
@@ -66,6 +68,7 @@ export default function CRMModule({ userId, onWriteEmail }: CRMModuleProps) {
   const [categories, setCategories] = useState<string[]>([]);
   const [dragOver, setDragOver] = useState<LeadStatus | null>(null);
   const [draggingLead, setDraggingLead] = useState<string | null>(null);
+  const [showCSVImport, setShowCSVImport] = useState(false);
 
   const supabase = createClient();
 
@@ -236,7 +239,7 @@ export default function CRMModule({ userId, onWriteEmail }: CRMModuleProps) {
 
       {/* Filter Bar */}
       <div className="px-4 sm:px-6 py-3 space-y-2 bg-gray-50 border-b border-gray-200">
-        {/* Status Filter */}
+        {/* Status Filter + Import button */}
         <div className="flex items-center gap-2 flex-wrap">
           <Filter size={13} className="text-gray-500 flex-shrink-0" />
           <span className="text-xs text-gray-500 font-medium">Status:</span>
@@ -268,6 +271,15 @@ export default function CRMModule({ userId, onWriteEmail }: CRMModuleProps) {
               </button>
             );
           })}
+
+          {/* Import CSV button */}
+          <button
+            onClick={() => setShowCSVImport(true)}
+            className="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold border border-blue-300 bg-blue-50 text-blue-700 hover:bg-blue-100 transition-colors flex-shrink-0"
+          >
+            <Upload size={12} />
+            Import CSV
+          </button>
         </div>
 
         {/* Category Filter */}
@@ -578,6 +590,18 @@ export default function CRMModule({ userId, onWriteEmail }: CRMModuleProps) {
             </div>
           </div>
         </div>
+      )}
+
+      {/* CSV Import Modal */}
+      {showCSVImport && (
+        <CSVImportModal
+          userId={userId}
+          onClose={() => setShowCSVImport(false)}
+          onImported={(count) => {
+            setShowCSVImport(false);
+            fetchLeads();
+          }}
+        />
       )}
     </div>
   );

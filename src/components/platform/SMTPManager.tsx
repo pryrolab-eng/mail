@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import { Plus, Mail, Trash2, CheckCircle, XCircle, AlertCircle, Settings } from "lucide-react";
 import { toast } from "sonner";
+import { createClient } from "../../../supabase/client";
 
 interface SMTPManagerProps {
   userId: string;
@@ -32,27 +33,37 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
     daily_limit: GMAIL_SMTP.limit,
   });
 
+  const supabase = createClient();
+
   useEffect(() => {
     loadAccounts();
   }, [userId]);
 
-  const loadAccounts = () => {
-    // Load from localStorage instead of Supabase
-    const stored = localStorage.getItem(`smtp_accounts_${userId}`);
-    if (stored) {
-      const loadedAccounts = JSON.parse(stored);
-      setAccounts(loadedAccounts);
-      
-      // Calculate capacity
-      const totalCapacity = loadedAccounts.reduce((sum: number, acc: any) => sum + acc.daily_limit, 0);
-      const totalUsed = loadedAccounts.reduce((sum: number, acc: any) => sum + (acc.sent_today || 0), 0);
-      
-      setCapacity({
-        total: totalCapacity,
-        used: totalUsed,
-        remaining: totalCapacity - totalUsed
-      });
+  const loadAccounts = async () => {
+    const { data, error } = await supabase
+      .from('smtp_accounts')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('Error loading SMTP accounts:', error);
+      console.error('Error details:', JSON.stringify(error, null, 2));
+      toast.error('Failed to load SMTP accounts: ' + (error.message || 'Unknown error'));
+      return;
     }
+
+    setAccounts(data || []);
+
+    // Calculate capacity
+    const totalCapacity = (data || []).reduce((sum: number, acc: any) => sum + acc.daily_limit, 0);
+    const totalUsed = (data || []).reduce((sum: number, acc: any) => sum + (acc.sent_today || 0), 0);
+
+    setCapacity({
+      total: totalCapacity,
+      used: totalUsed,
+      remaining: totalCapacity - totalUsed
+    });
   };
 
   const handleEmailChange = (email: string) => {
@@ -68,44 +79,70 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
     });
   };
 
-  const handleAddAccount = (e: React.FormEvent) => {
+  const handleAddAccount = async (e: React.FormEvent) => {
     e.preventDefault();
+    
+    // Validate email
+    if (!formData.email.toLowerCase().endsWith('@gmail.com')) {
+      toast.error("Only Gmail addresses are supported");
+      return;
+    }
+    
+    // Validate password
+    if (!formData.password || formData.password.length < 10) {
+      toast.error("Please enter a valid App Password (16 characters)");
+      return;
+    }
+    
     setLoading(true);
 
     try {
       // Create new account object
       const newAccount = {
-        id: crypto.randomUUID(),
         user_id: userId,
-        email: formData.email,
+        email: formData.email.toLowerCase().trim(),
         host: formData.host,
         port: formData.port,
         user_name: formData.user || formData.email,
-        password: formData.password, // In production, encrypt this
+        password: formData.password,
         provider: formData.provider,
         daily_limit: formData.daily_limit,
         sent_today: 0,
         status: 'active',
-        created_at: new Date().toISOString(),
         last_reset: new Date().toISOString()
       };
 
-      // Load existing accounts
-      const stored = localStorage.getItem(`smtp_accounts_${userId}`);
-      const existingAccounts = stored ? JSON.parse(stored) : [];
+      console.log('Attempting to insert SMTP account:', { ...newAccount, password: '***' });
 
-      // Check for duplicates
-      if (existingAccounts.some((acc: any) => acc.email === newAccount.email)) {
-        toast.error("This email address is already added");
+      // Insert into Supabase
+      const { data, error } = await supabase
+        .from('smtp_accounts')
+        .insert(newAccount)
+        .select();
+
+      if (error) {
+        console.error('Supabase error details:', {
+          message: error.message,
+          details: error.details,
+          hint: error.hint,
+          code: error.code
+        });
+        
+        if (error.code === '23505') { // Unique constraint violation
+          toast.error("This email address is already added");
+        } else if (error.code === '42P01') {
+          toast.error("SMTP table doesn't exist. Please run FIX_SMTP_TABLE.sql in Supabase SQL Editor");
+        } else if (error.message.includes('permission denied') || error.code === '42501') {
+          toast.error("Permission denied. Please run FIX_SMTP_TABLE.sql to set up RLS policies");
+        } else {
+          toast.error("Failed to add SMTP account: " + error.message);
+        }
         setLoading(false);
         return;
       }
 
-      // Add new account
-      const updatedAccounts = [...existingAccounts, newAccount];
-      localStorage.setItem(`smtp_accounts_${userId}`, JSON.stringify(updatedAccounts));
-
-      toast.success("Gmail SMTP account added successfully");
+      console.log('SMTP account added successfully:', data);
+      toast.success("Gmail SMTP account added successfully!");
       setShowAddForm(false);
       setFormData({
         provider: "Gmail",
@@ -116,7 +153,7 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
         password: "",
         daily_limit: GMAIL_SMTP.limit,
       });
-      loadAccounts();
+      await loadAccounts();
     } catch (error) {
       console.error('Exception adding SMTP account:', error);
       toast.error("An error occurred: " + (error instanceof Error ? error.message : 'Unknown error'));
@@ -125,15 +162,21 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
     }
   };
 
-  const handleDeleteAccount = (accountId: string) => {
-    const stored = localStorage.getItem(`smtp_accounts_${userId}`);
-    if (stored) {
-      const existingAccounts = JSON.parse(stored);
-      const updatedAccounts = existingAccounts.filter((acc: any) => acc.id !== accountId);
-      localStorage.setItem(`smtp_accounts_${userId}`, JSON.stringify(updatedAccounts));
-      toast.success("SMTP account deleted");
-      loadAccounts();
+  const handleDeleteAccount = async (accountId: string) => {
+    const { error } = await supabase
+      .from('smtp_accounts')
+      .delete()
+      .eq('id', accountId)
+      .eq('user_id', userId);
+
+    if (error) {
+      console.error('Error deleting SMTP account:', error);
+      toast.error('Failed to delete SMTP account');
+      return;
     }
+
+    toast.success("SMTP account deleted");
+    await loadAccounts();
   };
 
   const getStatusIcon = (status: string) => {
@@ -226,11 +269,12 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
                   value={formData.email}
                   onChange={(e) => handleEmailChange(e.target.value)}
                   placeholder="your-email@gmail.com"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full px-3 py-2 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
                   required
-                  pattern=".*@gmail\.com$"
-                  title="Please enter a valid Gmail address"
                 />
+                <p className="text-xs text-gray-500 mt-1">
+                  Only Gmail addresses (@gmail.com) are supported
+                </p>
               </div>
 
               <div className="md:col-span-2">
@@ -238,15 +282,15 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
                   App Password *
                 </label>
                 <input
-                  type="password"
+                  type="text"
                   value={formData.password}
-                  onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                  placeholder="16-character app password"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  onChange={(e) => setFormData({ ...formData, password: e.target.value.replace(/\s/g, '') })}
+                  placeholder="hibq evhe fzpc pedr (spaces will be removed)"
+                  className="w-full px-3 py-2 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900 font-mono"
                   required
                 />
                 <p className="text-xs text-gray-500 mt-1">
-                  Use a 16-character App Password from your Google Account settings
+                  16-character App Password from Google Account settings (spaces are automatically removed)
                 </p>
               </div>
 
@@ -257,8 +301,8 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
                 <input
                   type="number"
                   value={formData.daily_limit}
-                  onChange={(e) => setFormData({ ...formData, daily_limit: parseInt(e.target.value) })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  onChange={(e) => setFormData({ ...formData, daily_limit: parseInt(e.target.value) || 500 })}
+                  className="w-full px-3 py-2 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
                   min="1"
                   max="500"
                   required

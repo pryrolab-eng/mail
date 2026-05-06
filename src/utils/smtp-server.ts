@@ -100,7 +100,7 @@ export class SMTPManager {
       port: account.port,
       secure: account.port === 465,
       auth: {
-        user: account.user,
+        user: account.user_name,
         pass: account.password,
       },
       pool: true, // Use connection pooling

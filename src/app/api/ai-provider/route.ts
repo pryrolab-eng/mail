@@ -17,14 +17,39 @@ export async function GET(request: NextRequest) {
       process.env.SUPABASE_SERVICE_KEY!
     );
 
-    console.log('[API] Querying ai_providers table...');
+    console.log('[API] Querying ai_settings table...');
 
-    const { data: aiProvider, error } = await supabase
+    // First try to get active provider
+    let { data: aiProvider, error } = await supabase
       .from('ai_settings')
       .select('*')
       .eq('user_id', userId)
       .eq('is_active', true)
-      .single();
+      .maybeSingle();
+
+    // If no active provider, try to get any provider for this user
+    if (!aiProvider) {
+      console.log('[API] No active provider, checking for any provider...');
+      const { data: anyProvider } = await supabase
+        .from('ai_settings')
+        .select('*')
+        .eq('user_id', userId)
+        .limit(1)
+        .maybeSingle();
+      
+      if (anyProvider) {
+        console.log('[API] Found inactive provider, activating it...');
+        // Activate it automatically
+        const { data: updated } = await supabase
+          .from('ai_settings')
+          .update({ is_active: true })
+          .eq('id', anyProvider.id)
+          .select()
+          .single();
+        
+        aiProvider = updated;
+      }
+    }
 
     console.log('[API] Query result:', { aiProvider, error });
 
@@ -32,10 +57,9 @@ export async function GET(request: NextRequest) {
       console.error('[API] Error or no provider:', error);
       return NextResponse.json(
         { 
-          error: 'No active AI provider found', 
+          error: 'No AI provider configured. Please set up your AI provider in Settings first.', 
           details: error?.message || 'No data',
           userId,
-          hint: 'Check if ai_providers table exists and has data for this user'
         },
         { status: 404 }
       );
