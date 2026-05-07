@@ -321,7 +321,7 @@ export default function AISettingsModule({ userId }: AISettingsProps) {
                   style={{
                     background: "rgba(255,255,255,0.04)",
                     border: "1px solid #2A2D35",
-                    color: "#aaa",
+                    color: "#E5E7EB",
                     fontFamily: "JetBrains Mono, monospace",
                   }}
                 />

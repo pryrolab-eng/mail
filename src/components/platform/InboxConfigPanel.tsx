@@ -235,7 +235,7 @@ export default function InboxConfigPanel({ onRepliesFound }: InboxConfigPanelPro
                   value={form.email_address}
                   onChange={(e) => setForm((f) => ({ ...f, email_address: e.target.value, imap_username: e.target.value }))}
                   placeholder="you@gmail.com"
-                  className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full px-3 py-2 text-sm text-gray-900 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 placeholder:text-gray-400"
                 />
               </div>
 
@@ -248,7 +248,7 @@ export default function InboxConfigPanel({ onRepliesFound }: InboxConfigPanelPro
                     value={form.imap_host}
                     onChange={(e) => setForm((f) => ({ ...f, imap_host: e.target.value }))}
                     placeholder="imap.gmail.com"
-                    className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                    className="w-full px-3 py-2 text-sm text-gray-900 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 placeholder:text-gray-400"
                   />
                 </div>
                 <div>
@@ -258,7 +258,7 @@ export default function InboxConfigPanel({ onRepliesFound }: InboxConfigPanelPro
                     required
                     value={form.imap_port}
                     onChange={(e) => setForm((f) => ({ ...f, imap_port: parseInt(e.target.value) }))}
-                    className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                    className="w-full px-3 py-2 text-sm text-gray-900 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
                   />
                 </div>
               </div>
@@ -274,7 +274,7 @@ export default function InboxConfigPanel({ onRepliesFound }: InboxConfigPanelPro
                     value={form.imap_password}
                     onChange={(e) => setForm((f) => ({ ...f, imap_password: e.target.value }))}
                     placeholder="Gmail: use App Password, not your regular password"
-                    className="w-full px-3 py-2 pr-10 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                    className="w-full px-3 py-2 pr-10 text-sm text-gray-900 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 placeholder:text-gray-400"
                   />
                   <button
                     type="button"

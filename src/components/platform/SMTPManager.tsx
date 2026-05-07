@@ -242,7 +242,7 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
                   value={formData.email}
                   onChange={(e) => handleEmailChange(e.target.value)}
                   placeholder="your-email@gmail.com"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full px-3 py-2 text-gray-900 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 placeholder:text-gray-400"
                   required
                   pattern=".*@gmail\.com$"
                   title="Please enter a valid Gmail address"
@@ -258,7 +258,7 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
                   value={formData.password}
                   onChange={(e) => setFormData({ ...formData, password: e.target.value })}
                   placeholder="16-character app password"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full px-3 py-2 text-gray-900 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 placeholder:text-gray-400"
                   required
                 />
                 <p className="text-xs text-gray-500 mt-1">
@@ -274,7 +274,7 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
                   type="number"
                   value={formData.daily_limit}
                   onChange={(e) => setFormData({ ...formData, daily_limit: parseInt(e.target.value) })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full px-3 py-2 text-gray-900 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   min="1"
                   max="500"
                   required
