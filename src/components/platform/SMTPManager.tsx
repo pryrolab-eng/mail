@@ -81,26 +81,13 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
 
   const handleAddAccount = async (e: React.FormEvent) => {
     e.preventDefault();
-    
-    // Validate email
-    if (!formData.email.toLowerCase().endsWith('@gmail.com')) {
-      toast.error("Only Gmail addresses are supported");
-      return;
-    }
-    
-    // Validate password
-    if (!formData.password || formData.password.length < 10) {
-      toast.error("Please enter a valid App Password (16 characters)");
-      return;
-    }
-    
     setLoading(true);
 
     try {
       // Create new account object
       const newAccount = {
         user_id: userId,
-        email: formData.email.toLowerCase().trim(),
+        email: formData.email,
         host: formData.host,
         port: formData.port,
         user_name: formData.user || formData.email,
@@ -112,37 +99,23 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
         last_reset: new Date().toISOString()
       };
 
-      console.log('Attempting to insert SMTP account:', { ...newAccount, password: '***' });
-
       // Insert into Supabase
-      const { data, error } = await supabase
+      const { error } = await supabase
         .from('smtp_accounts')
-        .insert(newAccount)
-        .select();
+        .insert(newAccount);
 
       if (error) {
-        console.error('Supabase error details:', {
-          message: error.message,
-          details: error.details,
-          hint: error.hint,
-          code: error.code
-        });
-        
         if (error.code === '23505') { // Unique constraint violation
           toast.error("This email address is already added");
-        } else if (error.code === '42P01') {
-          toast.error("SMTP table doesn't exist. Please run FIX_SMTP_TABLE.sql in Supabase SQL Editor");
-        } else if (error.message.includes('permission denied') || error.code === '42501') {
-          toast.error("Permission denied. Please run FIX_SMTP_TABLE.sql to set up RLS policies");
         } else {
+          console.error('Error adding SMTP account:', error);
           toast.error("Failed to add SMTP account: " + error.message);
         }
         setLoading(false);
         return;
       }
 
-      console.log('SMTP account added successfully:', data);
-      toast.success("Gmail SMTP account added successfully!");
+      toast.success("Gmail SMTP account added successfully");
       setShowAddForm(false);
       setFormData({
         provider: "Gmail",
@@ -269,12 +242,11 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
                   value={formData.email}
                   onChange={(e) => handleEmailChange(e.target.value)}
                   placeholder="your-email@gmail.com"
-                  className="w-full px-3 py-2 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   required
+                  pattern=".*@gmail\.com$"
+                  title="Please enter a valid Gmail address"
                 />
-                <p className="text-xs text-gray-500 mt-1">
-                  Only Gmail addresses (@gmail.com) are supported
-                </p>
               </div>
 
               <div className="md:col-span-2">
@@ -282,15 +254,15 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
                   App Password *
                 </label>
                 <input
-                  type="text"
+                  type="password"
                   value={formData.password}
-                  onChange={(e) => setFormData({ ...formData, password: e.target.value.replace(/\s/g, '') })}
-                  placeholder="hibq evhe fzpc pedr (spaces will be removed)"
-                  className="w-full px-3 py-2 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900 font-mono"
+                  onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+                  placeholder="16-character app password"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   required
                 />
                 <p className="text-xs text-gray-500 mt-1">
-                  16-character App Password from Google Account settings (spaces are automatically removed)
+                  Use a 16-character App Password from your Google Account settings
                 </p>
               </div>
 
@@ -301,8 +273,8 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
                 <input
                   type="number"
                   value={formData.daily_limit}
-                  onChange={(e) => setFormData({ ...formData, daily_limit: parseInt(e.target.value) || 500 })}
-                  className="w-full px-3 py-2 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
+                  onChange={(e) => setFormData({ ...formData, daily_limit: parseInt(e.target.value) })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   min="1"
                   max="500"
                   required
