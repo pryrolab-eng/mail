@@ -119,10 +119,12 @@ export async function POST(request: NextRequest) {
         user_id: user.id,
         lead_id: leadId ?? null,
         campaign_id: campaignId ?? null,
+        to_email: to,
         subject,
         body: emailBody,
         sent_at: new Date().toISOString(),
         status: "sent",
+        smtp_account_id: smtpAccountId,
       })
       .select("id")
       .single();

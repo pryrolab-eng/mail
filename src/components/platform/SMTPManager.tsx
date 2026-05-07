@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import { Plus, Mail, Trash2, CheckCircle, XCircle, AlertCircle, Settings } from "lucide-react";
 import { toast } from "sonner";
+import { createClient } from "../../../supabase/client";
 
 interface SMTPManagerProps {
   userId: string;
@@ -32,27 +33,37 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
     daily_limit: GMAIL_SMTP.limit,
   });
 
+  const supabase = createClient();
+
   useEffect(() => {
     loadAccounts();
   }, [userId]);
 
-  const loadAccounts = () => {
-    // Load from localStorage instead of Supabase
-    const stored = localStorage.getItem(`smtp_accounts_${userId}`);
-    if (stored) {
-      const loadedAccounts = JSON.parse(stored);
-      setAccounts(loadedAccounts);
-      
-      // Calculate capacity
-      const totalCapacity = loadedAccounts.reduce((sum: number, acc: any) => sum + acc.daily_limit, 0);
-      const totalUsed = loadedAccounts.reduce((sum: number, acc: any) => sum + (acc.sent_today || 0), 0);
-      
-      setCapacity({
-        total: totalCapacity,
-        used: totalUsed,
-        remaining: totalCapacity - totalUsed
-      });
+  const loadAccounts = async () => {
+    const { data, error } = await supabase
+      .from('smtp_accounts')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('Error loading SMTP accounts:', error);
+      console.error('Error details:', JSON.stringify(error, null, 2));
+      toast.error('Failed to load SMTP accounts: ' + (error.message || 'Unknown error'));
+      return;
     }
+
+    setAccounts(data || []);
+
+    // Calculate capacity
+    const totalCapacity = (data || []).reduce((sum: number, acc: any) => sum + acc.daily_limit, 0);
+    const totalUsed = (data || []).reduce((sum: number, acc: any) => sum + (acc.sent_today || 0), 0);
+
+    setCapacity({
+      total: totalCapacity,
+      used: totalUsed,
+      remaining: totalCapacity - totalUsed
+    });
   };
 
   const handleEmailChange = (email: string) => {
@@ -68,42 +79,41 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
     });
   };
 
-  const handleAddAccount = (e: React.FormEvent) => {
+  const handleAddAccount = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
 
     try {
       // Create new account object
       const newAccount = {
-        id: crypto.randomUUID(),
         user_id: userId,
         email: formData.email,
         host: formData.host,
         port: formData.port,
         user_name: formData.user || formData.email,
-        password: formData.password, // In production, encrypt this
+        password: formData.password,
         provider: formData.provider,
         daily_limit: formData.daily_limit,
         sent_today: 0,
         status: 'active',
-        created_at: new Date().toISOString(),
         last_reset: new Date().toISOString()
       };
 
-      // Load existing accounts
-      const stored = localStorage.getItem(`smtp_accounts_${userId}`);
-      const existingAccounts = stored ? JSON.parse(stored) : [];
+      // Insert into Supabase
+      const { error } = await supabase
+        .from('smtp_accounts')
+        .insert(newAccount);
 
-      // Check for duplicates
-      if (existingAccounts.some((acc: any) => acc.email === newAccount.email)) {
-        toast.error("This email address is already added");
+      if (error) {
+        if (error.code === '23505') { // Unique constraint violation
+          toast.error("This email address is already added");
+        } else {
+          console.error('Error adding SMTP account:', error);
+          toast.error("Failed to add SMTP account: " + error.message);
+        }
         setLoading(false);
         return;
       }
-
-      // Add new account
-      const updatedAccounts = [...existingAccounts, newAccount];
-      localStorage.setItem(`smtp_accounts_${userId}`, JSON.stringify(updatedAccounts));
 
       toast.success("Gmail SMTP account added successfully");
       setShowAddForm(false);
@@ -116,7 +126,7 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
         password: "",
         daily_limit: GMAIL_SMTP.limit,
       });
-      loadAccounts();
+      await loadAccounts();
     } catch (error) {
       console.error('Exception adding SMTP account:', error);
       toast.error("An error occurred: " + (error instanceof Error ? error.message : 'Unknown error'));
@@ -125,15 +135,21 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
     }
   };
 
-  const handleDeleteAccount = (accountId: string) => {
-    const stored = localStorage.getItem(`smtp_accounts_${userId}`);
-    if (stored) {
-      const existingAccounts = JSON.parse(stored);
-      const updatedAccounts = existingAccounts.filter((acc: any) => acc.id !== accountId);
-      localStorage.setItem(`smtp_accounts_${userId}`, JSON.stringify(updatedAccounts));
-      toast.success("SMTP account deleted");
-      loadAccounts();
+  const handleDeleteAccount = async (accountId: string) => {
+    const { error } = await supabase
+      .from('smtp_accounts')
+      .delete()
+      .eq('id', accountId)
+      .eq('user_id', userId);
+
+    if (error) {
+      console.error('Error deleting SMTP account:', error);
+      toast.error('Failed to delete SMTP account');
+      return;
     }
+
+    toast.success("SMTP account deleted");
+    await loadAccounts();
   };
 
   const getStatusIcon = (status: string) => {

@@ -25,19 +25,41 @@ export async function generateAIEmail(params: EmailGenerationParams): Promise<{ 
   if (!response.ok) {
     const error = await response.json();
     console.error("AI provider fetch error:", error);
-    throw new Error("No active AI provider configured. Please set up AI in Settings.");
+    throw new Error(error.error || "No active AI provider configured. Please set up AI in Settings.");
   }
   
   const aiProvider = await response.json();
   
   // Build the prompt based on tone
   const toneInstructions = {
-    'Direct': `Write a clear, direct, professional cold email. No filler words, no fluff. Every sentence must earn its place.
-- Open with a one-line observation about their business that shows you actually looked at them
-- State the specific problem they face in their industry (be concrete, not generic)
-- Explain exactly how ${yourService} solves that problem — include a specific mechanism or result
-- Close with a single, low-friction CTA (e.g., "Worth a 15-minute call this week?")
-- Aim for 180–220 words — long enough to be credible, short enough to be read`,
+    'Direct': `Write a HARD DIRECT cold email. NO politeness. NO "reaching out" language. NO fluff.
+
+STRUCTURE (80-120 words total):
+1. SUBJECT LINE: State a specific problem they have (e.g., "Your ${lead.niche || 'team'} wastes X hours on [specific task]")
+2. OPENING: State the problem immediately. No greetings. No "I came across your company." Just the problem.
+3. SOLUTION: One sentence on what ${yourService} does. Be specific about the mechanism.
+4. PROOF: One sentence with a concrete result or timeframe.
+5. CTA: Direct question. No "Would you be available" or "Looking forward." Just: "15-minute call this week?"
+
+BANNED PHRASES:
+- "I'd love to"
+- "reaching out"
+- "I came across"
+- "Looking forward"
+- "Would you be available"
+- "I hope"
+- Any greeting beyond company name
+
+EXAMPLE:
+Subject: Your finance team wastes 12 hours monthly on FTSE reporting
+
+Your finance team wastes 12 hours monthly on manual FTSE 250 reporting.
+
+${yourService} automates it. 2-hour setup. Zero manual work after.
+
+Similar companies cut reporting time by 90%.
+
+15-minute call this week?`,
 
     'Aggressive': `Write a high-urgency, pattern-interrupting cold email that creates genuine FOMO.
 - Open with a bold, provocative statement about a costly problem in their industry — make it feel personal
@@ -45,7 +67,7 @@ export async function generateAIEmail(params: EmailGenerationParams): Promise<{ 
 - Name-drop a result you've achieved for a similar company (use a plausible example if needed)
 - Create urgency: limited availability, a deadline, or a window they're about to miss
 - End with a direct, binary CTA: "Are you open to a 20-minute call this week — yes or no?"
-- Aim for 200–250 words — punchy paragraphs, no long blocks of text`,
+- Aim for 120–180 words — punchy paragraphs, no long blocks of text`,
 
     'Surgical': `Write a hyper-personalized cold email that proves you did your homework on this specific company.
 - Open by referencing something specific from their company context — a recent initiative, their market position, or a detail from their website
@@ -53,14 +75,14 @@ export async function generateAIEmail(params: EmailGenerationParams): Promise<{ 
 - Explain how ${yourService} addresses that exact challenge — be specific about the mechanism
 - Reference a comparable company or result to build credibility
 - Close with a thoughtful, consultative CTA that feels like a natural next step, not a sales push
-- Aim for 220–280 words — this is a relationship-building email, not a one-liner`
+- Aim for 150–220 words — this is a relationship-building email, not a one-liner`
   };
 
   const companyContext = lead.company_context 
     ? lead.company_context.slice(0, 800) 
     : 'No additional context available';
 
-  const prompt = `You are an elite B2B cold email copywriter with a track record of 30%+ reply rates. You write emails that feel human, specific, and genuinely valuable — never spammy or templated.
+  const prompt = `You are an elite B2B cold email copywriter. You write emails that are DIRECT, PROBLEM-FOCUSED, and get responses. NO fluff. NO politeness. NO "reaching out" language.
 
 === SENDER INFO ===
 Company: ${yourCompany}
@@ -78,16 +100,24 @@ ${customPainPoint ? `=== SPECIFIC PAIN POINT TO ADDRESS ===\n${customPainPoint}\
 ${toneInstructions[tone]}
 
 === CRITICAL RULES ===
-- Never use placeholder text like [Your Name], [Company], [INSERT X HERE]
-- Never use generic openers like "I hope this email finds you well" or "My name is..."
-- Never make up specific metrics you can't back up — use ranges or "companies like yours"
-- The email must feel like it was written specifically for ${lead.company_name}, not copy-pasted
-- Sign off naturally without a name placeholder — end with just the CTA or a simple "Best,"
-- Do NOT include a signature block
+- SUBJECT LINE: Must state a specific problem (e.g., "Your team wastes X hours on [task]")
+- NO greetings like "Hi", "Hello", "Dear"
+- NO "I hope this email finds you well"
+- NO "I came across your company"
+- NO "reaching out"
+- NO "I'd love to"
+- NO "Looking forward to"
+- NO "Would you be available"
+- Start IMMEDIATELY with the problem
+- Keep it SHORT: 80-120 words for Direct tone
+- Be SPECIFIC about problems in their industry/niche
+- End with DIRECT question: "15-minute call this week?" or "Call Tuesday at 2pm?"
+- NO signature block, NO name placeholder
+- The email must feel like a punch, not a conversation
 
 Format your response EXACTLY like this (no extra text before or after):
-SUBJECT: [subject line — max 65 characters, no quotes]
-BODY: [full email body]`;
+SUBJECT: [problem-focused subject line — max 60 characters, no quotes]
+BODY: [email body — direct, short, problem-focused]`;
 
   // Call AI API
   let aiResponse;
@@ -103,7 +133,7 @@ BODY: [full email body]`;
         body: JSON.stringify({
           model: aiProvider.active_model || "gpt-4o-mini",
           messages: [
-            { role: "system", content: "You are an elite B2B cold email copywriter. You write emails that feel human, specific, and genuinely valuable — never spammy or templated. Always follow the exact output format requested." },
+            { role: "system", content: "You are a HARD DIRECT B2B cold email copywriter. NO politeness. NO fluff. NO 'reaching out' language. Start with the problem. Keep it short (80-120 words). Subject lines must state specific problems. Always follow the exact output format requested." },
             { role: "user", content: prompt }
           ],
           temperature: 0.75,
@@ -129,7 +159,7 @@ BODY: [full email body]`;
         body: JSON.stringify({
           model: aiProvider.active_model || "claude-3-5-sonnet-20241022",
           max_tokens: 900,
-          system: "You are an elite B2B cold email copywriter. You write emails that feel human, specific, and genuinely valuable — never spammy or templated. Always follow the exact output format requested.",
+          system: "You are a HARD DIRECT B2B cold email copywriter. NO politeness. NO fluff. NO 'reaching out' language. Start with the problem. Keep it short (80-120 words). Subject lines must state specific problems. Always follow the exact output format requested.",
           messages: [
             { role: "user", content: prompt }
           ]
@@ -144,14 +174,6 @@ BODY: [full email body]`;
       aiResponse = data.content[0].text;
       
     } else if (aiProvider.provider === "groq") {
-      console.log('=== GROQ API CALL ===');
-      console.log('Model:', aiProvider.active_model || "llama-3.3-70b-versatile");
-      console.log('API Key present:', !!aiProvider.api_key);
-      console.log('API Key length:', aiProvider.api_key?.length);
-      console.log('API Key prefix:', aiProvider.api_key?.substring(0, 10));
-      console.log('Prompt length:', prompt.length);
-      console.log('====================');
-      
       const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -161,7 +183,7 @@ BODY: [full email body]`;
         body: JSON.stringify({
           model: aiProvider.active_model || "llama-3.3-70b-versatile",
           messages: [
-            { role: "system", content: "You are an elite B2B cold email copywriter. You write emails that feel human, specific, and genuinely valuable — never spammy or templated. Always follow the exact output format requested." },
+            { role: "system", content: "You are a HARD DIRECT B2B cold email copywriter. NO politeness. NO fluff. NO 'reaching out' language. Start with the problem. Keep it short (80-120 words). Subject lines must state specific problems. Always follow the exact output format requested." },
             { role: "user", content: prompt }
           ],
           temperature: 0.75,
@@ -175,30 +197,17 @@ BODY: [full email body]`;
         
         try {
           errorText = await response.text();
-          console.log('Raw error text from Groq:', errorText);
           
           if (errorText) {
             try {
               errorJson = JSON.parse(errorText);
-              console.log('Parsed error JSON:', JSON.stringify(errorJson, null, 2));
             } catch (parseError) {
-              console.log('Could not parse error as JSON');
+              // Not JSON, use text as-is
             }
           }
         } catch (e) {
           console.error('Error reading response text:', e);
         }
-        
-        // Log each piece separately for better visibility
-        console.error('=== GROQ API ERROR ===');
-        console.error('Status:', response.status);
-        console.error('Status Text:', response.statusText);
-        console.error('Error Text:', errorText);
-        console.error('Error JSON:', errorJson);
-        console.error('Response Headers:', Object.fromEntries(response.headers.entries()));
-        console.error('API Key (first 10 chars):', aiProvider.api_key?.substring(0, 10));
-        console.error('Model:', aiProvider.active_model || "llama-3.3-70b-versatile");
-        console.error('======================');
         
         // Build detailed error message
         let errorMessage = 'Unknown error';
@@ -206,18 +215,20 @@ BODY: [full email body]`;
         if (errorJson?.error?.message) {
           errorMessage = errorJson.error.message;
         } else if (errorText) {
-          errorMessage = errorText;
+          errorMessage = errorText.substring(0, 200); // Limit length
         } else if (response.statusText) {
           errorMessage = response.statusText;
         }
         
         // Add helpful context based on status code
         if (response.status === 401) {
-          errorMessage += ' - Check your Groq API key is valid';
+          throw new Error('Groq API authentication failed. Please check your API key in Settings.');
         } else if (response.status === 429) {
-          errorMessage += ' - Rate limit exceeded. Wait a moment and try again';
+          throw new Error('Groq rate limit exceeded. Please wait a moment and try again.');
         } else if (response.status === 404) {
-          errorMessage += ' - Model not found. Check the model name is correct';
+          throw new Error(`Groq model "${aiProvider.active_model || "llama-3.3-70b-versatile"}" not found. Please check the model name in Settings.`);
+        } else if (response.status === 400) {
+          throw new Error(`Groq API error: ${errorMessage}`);
         }
         
         throw new Error(`Groq API error (${response.status}): ${errorMessage}`);
