@@ -471,7 +471,7 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
                         value={leadSearch}
                         onChange={(e) => setLeadSearch(e.target.value)}
                         placeholder="Search leads…"
-                        className="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 outline-none focus:border-blue-400"
+                        className="w-full px-3 py-2 text-sm text-gray-900 rounded-lg border border-gray-200 outline-none focus:border-blue-400 placeholder:text-gray-400"
                       />
                     </div>
                     <div className="max-h-52 overflow-y-auto">
@@ -644,7 +644,7 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
                       value={customRecipient}
                       onChange={(e) => setCustomRecipient(e.target.value)}
                       placeholder="Enter any email address…"
-                      className="w-full px-4 py-2.5 rounded-xl text-sm border border-gray-300 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 bg-white outline-none transition-all"
+                      className="w-full px-4 py-2.5 rounded-xl text-sm text-gray-900 border border-gray-300 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 bg-white outline-none transition-all placeholder:text-gray-400"
                     />
                   )}
 
@@ -675,12 +675,12 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
                   <div>
                     <label className="block text-xs font-semibold uppercase tracking-widest mb-2 text-gray-500">Your Company</label>
                     <input value={bulkYourCompany} onChange={(e) => setBulkYourCompany(e.target.value)} placeholder="e.g. Acme Inc"
-                      className="w-full px-4 py-3 rounded-xl text-sm border border-gray-300 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 bg-white outline-none transition-all" />
+                      className="w-full px-4 py-3 rounded-xl text-sm text-gray-900 border border-gray-300 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 bg-white outline-none transition-all placeholder:text-gray-400" />
                   </div>
                   <div>
                     <label className="block text-xs font-semibold uppercase tracking-widest mb-2 text-gray-500">Your Service / Product</label>
                     <input value={bulkYourService} onChange={(e) => setBulkYourService(e.target.value)} placeholder="e.g. AI-powered CRM"
-                      className="w-full px-4 py-3 rounded-xl text-sm border border-gray-300 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 bg-white outline-none transition-all" />
+                      className="w-full px-4 py-3 rounded-xl text-sm text-gray-900 border border-gray-300 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 bg-white outline-none transition-all placeholder:text-gray-400" />
                   </div>
                 </div>
 
@@ -857,7 +857,7 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
                 <AtSign size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" />
                 <input type="email" value={manualTo} onChange={(e) => setManualTo(e.target.value)}
                   placeholder="recipient@company.com"
-                  className="w-full pl-9 pr-4 py-3 rounded-xl text-sm border border-gray-300 focus:border-orange-400 focus:ring-2 focus:ring-orange-100 bg-white outline-none transition-all" />
+                  className="w-full pl-9 pr-4 py-3 rounded-xl text-sm text-gray-900 border border-gray-300 focus:border-orange-400 focus:ring-2 focus:ring-orange-100 bg-white outline-none transition-all placeholder:text-gray-400" />
               </div>
             </div>
 
@@ -865,14 +865,14 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
               <label className="block text-xs font-semibold uppercase tracking-widest mb-2 text-gray-500">Subject</label>
               <input type="text" value={manualSubject} onChange={(e) => setManualSubject(e.target.value)}
                 placeholder="e.g. Quick question about your business"
-                className="w-full px-4 py-3 rounded-xl text-sm border border-gray-300 focus:border-orange-400 focus:ring-2 focus:ring-orange-100 bg-white outline-none transition-all" />
+                className="w-full px-4 py-3 rounded-xl text-sm text-gray-900 border border-gray-300 focus:border-orange-400 focus:ring-2 focus:ring-orange-100 bg-white outline-none transition-all placeholder:text-gray-400" />
             </div>
 
             <div>
               <label className="block text-xs font-semibold uppercase tracking-widest mb-2 text-gray-500">Body</label>
               <textarea value={manualBody} onChange={(e) => setManualBody(e.target.value)} rows={14}
                 placeholder={"Hi,\n\nWrite your email here...\n\nBest,\nYour Name"}
-                className="w-full px-4 py-3 rounded-xl text-sm border border-gray-300 focus:border-orange-400 focus:ring-2 focus:ring-orange-100 bg-white outline-none transition-all resize-none"
+                className="w-full px-4 py-3 rounded-xl text-sm text-gray-900 border border-gray-300 focus:border-orange-400 focus:ring-2 focus:ring-orange-100 bg-white outline-none transition-all resize-none placeholder:text-gray-400"
                 style={{ lineHeight: "1.7" }} />
             </div>
 

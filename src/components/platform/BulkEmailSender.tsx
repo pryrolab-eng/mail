@@ -146,7 +146,7 @@ export default function BulkEmailSender({ userId, selectedLeads, onComplete }: B
                   value={yourCompany}
                   onChange={(e) => setYourCompany(e.target.value)}
                   placeholder="e.g., Acme Solutions"
-                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full px-4 py-3 text-gray-900 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 placeholder:text-gray-400"
                 />
               </div>
 
@@ -159,7 +159,7 @@ export default function BulkEmailSender({ userId, selectedLeads, onComplete }: B
                   value={yourService}
                   onChange={(e) => setYourService(e.target.value)}
                   placeholder="e.g., AI-powered marketing automation"
-                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full px-4 py-3 text-gray-900 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 placeholder:text-gray-400"
                 />
               </div>
 
