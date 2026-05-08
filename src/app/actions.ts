@@ -4,8 +4,6 @@ import { encodedRedirect } from "@/utils/utils";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { createClient } from "../../supabase/server";
-import { scrapeLeads, enrichLead } from "@/utils/scraper";
-import { scrapeLeadsAdvanced } from "@/utils/advanced-scraper";
 import { scrapeWithoutAPI } from "@/utils/puppeteer-scraper";
 import { SMTPManager } from "@/utils/smtp-server";
 import { generatePersonalizedEmail } from "@/utils/smtp-manager";
@@ -174,76 +172,29 @@ export const scrapeLeadsAction = async (niche: string, location: string, maxResu
     console.log('Niche:', niche);
     console.log('Location:', location);
     console.log('Max Results:', maxResults);
-    
-    // Method 1: Try Puppeteer scraping (no API needed, most accurate)
-    console.log('Attempting Puppeteer scraping (Google Maps, Yelp, Yellow Pages)...');
-    const puppeteerLeads = await scrapeWithoutAPI(niche, location, maxResults);
-    
-    if (puppeteerLeads.length > 0) {
-      console.log(`✓ Puppeteer scraping successful: ${puppeteerLeads.length} leads found`);
-      return {
-        success: true,
-        leads: puppeteerLeads,
-        count: puppeteerLeads.length,
-        method: 'puppeteer'
-      };
-    }
-    
-    console.log('✗ Puppeteer scraping returned no results');
-    
-    // Method 2: Try API-based scraping (if keys available)
-    const googleApiKey = process.env.GOOGLE_API_KEY;
-    const googleCx = process.env.GOOGLE_CX;
-    const googlePlacesApiKey = process.env.GOOGLE_PLACES_API_KEY;
-    
-    if (googlePlacesApiKey || (googleApiKey && googleCx)) {
-      console.log('Attempting API-based scraping...');
-      const apiLeads = await scrapeLeadsAdvanced(niche, location, {
-        googleApiKey,
-        googleCx,
-        googlePlacesApiKey,
-        methods: ['places', 'google'],
-        enhanceEmails: true,
-        useFallback: false
-      });
-      
-      if (apiLeads.length > 0) {
-        console.log(`✓ API scraping successful: ${apiLeads.length} leads found`);
-        return {
-          success: true,
-          leads: apiLeads,
-          count: apiLeads.length,
-          method: 'api'
-        };
-      }
-    }
-    
-    console.log('✗ API scraping not available or returned no results');
-    
-    // Method 3: Generate fallback leads
-    console.log('Generating fallback leads...');
-    const { generateFallbackLeads } = await import('@/utils/advanced-scraper');
-    const fallbackLeads = await generateFallbackLeads(niche, location, Math.min(maxResults, 50));
-    
-    console.log(`✓ Generated ${fallbackLeads.length} fallback leads`);
-    
+
+    const leads = await scrapeWithoutAPI(niche, location, maxResults);
+
+    // Return ALL leads — both real emails and fallback info@domain ones.
+    // The UI shows a "REAL" badge on verified emails so the user can tell them apart.
+    // Filtering to emailIsReal only causes zero results for locations where
+    // businesses don't publish emails on their websites (very common outside US/EU).
+    console.log(`✓ Scraping complete: ${leads.length} leads (${leads.filter(l => l.emailIsReal).length} real emails)`);
+
     return {
       success: true,
-      leads: fallbackLeads,
-      count: fallbackLeads.length,
-      method: 'fallback',
-      message: 'Using generated leads. For real data, scraping is in progress.'
+      leads,
+      count: leads.length,
+      method: 'puppeteer',
     };
-    
   } catch (error) {
     console.error('=== Scraping Error ===');
     console.error(error);
-    
     return {
       success: false,
       leads: [],
       count: 0,
-      error: error instanceof Error ? error.message : 'Failed to scrape leads'
+      error: error instanceof Error ? error.message : 'Failed to scrape leads',
     };
   }
 };

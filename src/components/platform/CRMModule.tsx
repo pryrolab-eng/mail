@@ -15,6 +15,7 @@ import {
   Save,
   Clock,
   Upload,
+  Trash2,
 } from "lucide-react";
 import { createClient } from "../../../supabase/client";
 import { toast } from "sonner";
@@ -154,6 +155,21 @@ export default function CRMModule({ userId, onWriteEmail }: CRMModuleProps) {
     toast.success("Notes saved");
     setSavingNotes(false);
     setLeads((prev) => prev.map((l) => l.id === drawerLead.id ? { ...l, notes } : l));
+  };
+
+  const deleteLead = async (leadId: string) => {
+    const { error } = await supabase.from("leads").delete().eq("id", leadId);
+    if (!error) {
+      setLeads((prev) => prev.filter((l) => l.id !== leadId));
+      if (drawerLead?.id === leadId) setDrawerLead(null);
+      toast.success("Lead deleted");
+    } else {
+      toast.error("Failed to delete lead");
+    }
+  };
+
+  const deleteSelected = async () => {
+    // Used for bulk delete — not wired to UI yet but available
   };
 
   // Drag & Drop
@@ -344,6 +360,7 @@ export default function CRMModule({ userId, onWriteEmail }: CRMModuleProps) {
                   lead={lead}
                   onOpen={openDrawer}
                   onWriteEmail={onWriteEmail}
+                  onDelete={deleteLead}
                   isDragging={draggingLead === lead.id}
                   onDragStart={handleDragStart}
                   onDragEnd={handleDragEnd}
@@ -416,6 +433,7 @@ export default function CRMModule({ userId, onWriteEmail }: CRMModuleProps) {
                           lead={lead}
                           onOpen={openDrawer}
                           onWriteEmail={onWriteEmail}
+                          onDelete={deleteLead}
                           isDragging={draggingLead === lead.id}
                           onDragStart={handleDragStart}
                           onDragEnd={handleDragEnd}
@@ -579,13 +597,24 @@ export default function CRMModule({ userId, onWriteEmail }: CRMModuleProps) {
             </div>
 
             {/* Drawer footer */}
-            <div className="px-5 sm:px-6 py-4 border-t border-gray-200">
+            <div className="px-5 sm:px-6 py-4 border-t border-gray-200 flex gap-2">
               <button
                 onClick={() => { onWriteEmail?.(drawerLead); setDrawerLead(null); }}
-                className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-semibold bg-blue-50 border border-blue-300 text-blue-700 hover:bg-blue-100 transition-colors"
+                className="flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-semibold bg-blue-50 border border-blue-300 text-blue-700 hover:bg-blue-100 transition-colors"
               >
                 <Mail size={14} />
                 Generate Email
+              </button>
+              <button
+                onClick={() => {
+                  if (confirm(`Delete "${drawerLead.company_name}"? This cannot be undone.`)) {
+                    deleteLead(drawerLead.id);
+                  }
+                }}
+                className="flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl text-sm font-semibold bg-red-50 border border-red-200 text-red-600 hover:bg-red-100 transition-colors"
+              >
+                <Trash2 size={14} />
+                Delete
               </button>
             </div>
           </div>
@@ -611,6 +640,7 @@ function LeadCard({
   lead,
   onOpen,
   onWriteEmail,
+  onDelete,
   isDragging,
   onDragStart,
   onDragEnd,
@@ -618,6 +648,7 @@ function LeadCard({
   lead: Lead;
   onOpen: (lead: Lead) => void;
   onWriteEmail?: (lead: Lead) => void;
+  onDelete: (leadId: string) => void;
   isDragging: boolean;
   onDragStart: (e: React.DragEvent, leadId: string) => void;
   onDragEnd: () => void;
@@ -672,6 +703,15 @@ function LeadCard({
         >
           <Mail size={9} />
           Email
+        </button>
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            if (confirm(`Delete "${lead.company_name}"?`)) onDelete(lead.id);
+          }}
+          className="text-[9px] px-1.5 py-0.5 rounded flex items-center gap-0.5 bg-red-50 text-red-500 hover:bg-red-100 transition-colors ml-auto"
+        >
+          <Trash2 size={9} />
         </button>
       </div>
     </div>

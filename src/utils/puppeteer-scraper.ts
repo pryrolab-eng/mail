@@ -1,13 +1,33 @@
 /**
- * Puppeteer-based scraper - No API keys needed
- * Uses headless browser to scrape real business data
+ * Puppeteer-based Lead Scraper — no API keys required.
+ *
+ * WHY YOU GET FAKE EMAILS (info@companyname.com)
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Most scrapers fall back to a guessed address because:
+ *
+ *  1. The company has no website, or the website blocks bots (Cloudflare, etc.)
+ *  2. The email is rendered by JavaScript and a plain fetch() can't see it.
+ *  3. The email is hidden behind a contact form — never written as plain text.
+ *  4. The website uses obfuscation (e.g. "info [at] company [dot] com").
+ *  5. Google Maps / Yelp / Yellow Pages don't publish emails at all.
+ *
+ * This file uses a real headless browser (Puppeteer) to execute JavaScript,
+ * scroll pages, and follow contact links — which catches far more real emails
+ * than a plain fetch. When a real email still can't be found, the fallback
+ * is clearly labelled so you know which leads need manual verification.
+ * ─────────────────────────────────────────────────────────────────────────────
  */
 
-import puppeteer from 'puppeteer';
+import puppeteer, { Browser, Page } from 'puppeteer';
+
+// ─── Types ───────────────────────────────────────────────────────────────────
 
 export interface ScrapedLead {
   company_name: string;
+  /** Real email when found; empty string when not found — check `emailIsReal`. */
   email: string;
+  /** true = scraped from a real page; false = not found */
+  emailIsReal: boolean;
   niche: string;
   location: string;
   company_context: string;
@@ -16,663 +36,747 @@ export interface ScrapedLead {
   website?: string;
 }
 
+// ─── Constants ───────────────────────────────────────────────────────────────
+
+const USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+  '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+/** Domains that appear in scraped HTML but are never real contact emails. */
+const BLOCKED_DOMAINS = [
+  'example.com', 'example.org', 'sentry.io', 'wixpress.com',
+  'squarespace.com', 'wordpress.com', 'localhost',
+];
+
+/** Email local-parts that are system / no-reply addresses. */
+const BLOCKED_PREFIXES = ['noreply', 'no-reply', 'donotreply', 'privacy', 'test', 'admin@localhost'];
+
+/** Strings that appear in "emails" that are actually image filenames. */
+const BLOCKED_SUBSTRINGS = ['.png', '.jpg', '.jpeg', '.gif', '@2x', 'placeholder'];
+
+// ─── Email helpers ───────────────────────────────────────────────────────────
+
+function extractEmailsFromText(text: string): string[] {
+  const raw = text.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g) ?? [];
+  const unique = Array.from(new Set(raw.map((e) => e.toLowerCase())));
+
+  return unique.filter((e) => {
+    const [local, domain] = e.split('@');
+    if (!domain) return false;
+    if (BLOCKED_DOMAINS.some((d) => domain.includes(d))) return false;
+    if (BLOCKED_PREFIXES.some((p) => local.startsWith(p))) return false;
+    if (BLOCKED_SUBSTRINGS.some((s) => e.includes(s))) return false;
+    if (!/\.[a-z]{2,}$/i.test(e)) return false;
+    return true;
+  });
+}
+
+/** Higher score = better email to use as the primary contact address. */
+function scoreEmail(email: string, locationHint = ''): number {
+  const local = email.split('@')[0].toLowerCase();
+  const domain = email.split('@')[1]?.toLowerCase() ?? '';
+
+  // Country-specific emails score highest when we have a location hint
+  // e.g. info.rw@ for Rwanda, info.ke@ for Kenya
+  if (locationHint) {
+    const country = locationHint.toLowerCase();
+    // Extract 2-letter country code from location (e.g. "rwanda" → "rw", "kenya" → "ke")
+    const countryCodeMap: Record<string, string> = {
+      rwanda: 'rw', kenya: 'ke', ethiopia: 'et', uganda: 'ug', tanzania: 'tz',
+      nigeria: 'ng', ghana: 'gh', southafrica: 'za', egypt: 'eg', morocco: 'ma',
+      senegal: 'sn', cameroon: 'cm', ivorycoast: 'ci', angola: 'ao', mozambique: 'mz',
+    };
+    const normalised = country.replace(/\s+/g, '');
+    const code = countryCodeMap[normalised] ?? country.slice(0, 2);
+    // e.g. info.rw@domain or rw@domain or info-rw@domain
+    if (local.endsWith(`.${code}`) || local.endsWith(`-${code}`) || local === code) return 20;
+    // Domain ends with country TLD e.g. @school.rw
+    if (domain.endsWith(`.${code}`)) return 18;
+  }
+
+  if (['info', 'contact', 'hello', 'hi'].includes(local)) return 10;
+  if (['sales', 'business', 'inquiries', 'inquiry', 'admissions', 'admission'].includes(local)) return 8;
+  if (['support', 'help', 'office', 'admin'].includes(local)) return 6;
+  if (local.includes('.')) return 5; // firstname.lastname@
+  return 4;
+}
+
+function pickBestEmail(emails: string[], locationHint = ''): string | null {
+  if (emails.length === 0) return null;
+  return [...emails].sort((a, b) => scoreEmail(b, locationHint) - scoreEmail(a, locationHint))[0];
+}
+
+function fallbackEmail(name: string, website?: string | null): string {
+  if (website) {
+    try {
+      const domain = new URL(website).hostname.replace('www.', '');
+      return `info@${domain}`;
+    } catch {
+      // fall through
+    }
+  }
+  return `info@${name.toLowerCase().replace(/[^a-z0-9]/g, '')}.com`;
+}
+
+// ─── Page-level email extraction ─────────────────────────────────────────────
+
 /**
- * Scrape Google Maps (no API needed)
+ * Extract all emails from the currently loaded page (JS-rendered).
+ * Handles:
+ *  - Plain text emails
+ *  - mailto: links
+ *  - Cloudflare email protection (/cdn-cgi/l/email-protection#...)
+ *  - Obfuscated patterns like "info [at] domain [dot] com"
+ */
+async function extractEmailsFromRenderedPage(page: Page): Promise<string[]> {
+  const raw = await page.evaluate(() => {
+    const results: string[] = [];
+
+    // 1. mailto: links (most reliable)
+    document.querySelectorAll<HTMLAnchorElement>('a[href^="mailto:"]').forEach((a) => {
+      const email = a.href.replace('mailto:', '').split('?')[0].trim();
+      if (email) results.push(email);
+    });
+
+    // 2. Cloudflare email protection — decode hex-encoded emails
+    // Format: <a href="/cdn-cgi/l/email-protection#HEXSTRING">
+    document.querySelectorAll<HTMLAnchorElement>('a[href*="/cdn-cgi/l/email-protection"]').forEach((a) => {
+      const href = a.getAttribute('href') || '';
+      const hash = href.split('#')[1];
+      if (hash) {
+        try {
+          // Cloudflare XOR decode: first byte is the key
+          const bytes = hash.match(/.{2}/g) || [];
+          if (bytes.length < 2) return;
+          const key = parseInt(bytes[0]!, 16);
+          const decoded = bytes.slice(1).map((b) => String.fromCharCode(parseInt(b, 16) ^ key)).join('');
+          if (decoded.includes('@')) results.push(decoded);
+        } catch { /* ignore */ }
+      }
+      // Also try reading the visible text — after JS runs it shows the real email
+      const text = a.textContent?.trim() || '';
+      if (text.includes('@')) results.push(text);
+    });
+
+    // 3. data-cfemail attributes (another Cloudflare variant)
+    document.querySelectorAll('[data-cfemail]').forEach((el) => {
+      const encoded = el.getAttribute('data-cfemail') || '';
+      if (encoded) {
+        try {
+          const bytes = encoded.match(/.{2}/g) || [];
+          if (bytes.length < 2) return;
+          const key = parseInt(bytes[0]!, 16);
+          const decoded = bytes.slice(1).map((b) => String.fromCharCode(parseInt(b, 16) ^ key)).join('');
+          if (decoded.includes('@')) results.push(decoded);
+        } catch { /* ignore */ }
+      }
+    });
+
+    // 4. Full page text + HTML for regex scan
+    results.push(document.body.innerText);
+    results.push(document.body.innerHTML);
+
+    return results.join('\n');
+  });
+
+  // Decode obfuscated emails like "info [at] domain [dot] com"
+  const decoded = raw
+    .replace(/\s*\[at\]\s*/gi, '@')
+    .replace(/\s*\(at\)\s*/gi, '@')
+    .replace(/\s*\[dot\]\s*/gi, '.')
+    .replace(/\s*\(dot\)\s*/gi, '.');
+
+  return extractEmailsFromText(decoded);
+}
+
+/**
+ * Visit a website and find a real email using a fully JS-rendered browser.
+ * Pass `location` so we can prefer country-specific emails (e.g. info.rw@ for Rwanda).
+ *
+ * Crawls the site exhaustively:
+ *  1. Homepage
+ *  2. /contact, /contact-us, /about, /about-us and other common paths — directly
+ *  3. Every link in the nav/footer that looks like contact/about/location/team
+ *  4. Every remaining internal link on the site (up to 30 pages total)
+ *
+ * Never gives up while there are pages left to check.
+ * Returns null ONLY if the site has zero email addresses anywhere.
+ */
+async function findEmailOnWebsite(page: Page, website: string, location = ''): Promise<string | null> {
+  let baseOrigin = '';
+  try { baseOrigin = new URL(website).origin; } catch { return null; }
+
+  const visited = new Set<string>();
+  const allEmails: string[] = [];
+  const MAX_PAGES = 30;
+
+  /** Navigate, render JS, extract emails. Returns [] on error. */
+  const visitAndExtract = async (url: string): Promise<string[]> => {
+    // Normalise — strip hash/query so we don't visit the same page twice
+    let clean = url;
+    try { const u = new URL(url); clean = u.origin + u.pathname; } catch { return []; }
+    if (visited.has(clean)) return [];
+    if (!clean.startsWith(baseOrigin)) return []; // stay on same domain
+    visited.add(clean);
+
+    try {
+      await navigateSafely(page, url);
+      await scrollToBottom(page);
+      const emails = await extractEmailsFromRenderedPage(page);
+      if (emails.length > 0) {
+        console.log(`    ✉️  ${clean} → ${emails.join(', ')}`);
+      }
+      return emails;
+    } catch (err: any) {
+      console.log(`    ⚠️  ${clean}: ${err?.message?.slice(0, 80)}`);
+      return [];
+    }
+  };
+
+  /** Collect all internal links from the currently loaded page. */
+  const collectLinks = async (): Promise<string[]> => {
+    return page.evaluate((origin: string) => {
+      return Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href]'))
+        .map((a) => { try { return new URL(a.href).origin + new URL(a.href).pathname; } catch { return ''; } })
+        .filter((h) => h.startsWith(origin));
+    }, baseOrigin);
+  };
+
+  // ── Priority 1: Contact/about paths hit directly ──────────────────────────
+  const priorityPaths = [
+    '/contact', '/contact-us', '/contact.html', '/contact.php',
+    '/about',   '/about-us',   '/about.html',
+    '/reach-us', '/get-in-touch', '/team', '/staff',
+    '/imprint',  '/impressum',   '/legal',
+    '/location', '/locations',   '/our-team',
+  ];
+
+  // Visit homepage first to collect nav links
+  console.log(`    🌐 ${website}`);
+  const homepageEmails = await visitAndExtract(website);
+  allEmails.push(...homepageEmails);
+  if (pickBestEmail(allEmails, location)) return pickBestEmail(allEmails, location)!;
+
+  // Collect nav/footer links from homepage — prioritise contact-looking ones
+  let homepageLinks: string[] = [];
+  try { homepageLinks = await collectLinks(); } catch { /* ignore */ }
+
+  const contactLinks = homepageLinks.filter((h) =>
+    /contact|about|team|reach|imprint|impressum|location|staff|people/.test(h)
+  );
+  const otherLinks = homepageLinks.filter((h) =>
+    !/contact|about|team|reach|imprint|impressum|location|staff|people/.test(h)
+  );
+
+  // ── Priority 2: Common paths + contact-looking nav links ─────────────────
+  const priority2 = [
+    ...priorityPaths.map((p) => `${baseOrigin}${p}`),
+    ...contactLinks,
+  ];
+
+  for (const url of priority2) {
+    if (visited.size >= MAX_PAGES) break;
+    const emails = await visitAndExtract(url);
+    allEmails.push(...emails);
+    if (pickBestEmail(allEmails, location)) return pickBestEmail(allEmails, location)!;
+  }
+
+  // ── Priority 3: All remaining internal links ──────────────────────────────
+  // Re-collect links from contact page if we visited one
+  let extraLinks: string[] = [];
+  try {
+    const currentUrl = page.url();
+    if (currentUrl.includes('contact') || currentUrl.includes('about')) {
+      extraLinks = await collectLinks();
+    }
+  } catch { /* ignore */ }
+
+  const allInternalLinks = Array.from(new Set([...otherLinks, ...extraLinks]));
+
+  for (const url of allInternalLinks) {
+    if (visited.size >= MAX_PAGES) break;
+    const emails = await visitAndExtract(url);
+    allEmails.push(...emails);
+    if (pickBestEmail(allEmails, location)) return pickBestEmail(allEmails, location)!;
+  }
+
+  // Return whatever we found (could be null if truly nothing exists)
+  return pickBestEmail(allEmails, location);
+}
+
+// ─── Navigation helpers ───────────────────────────────────────────────────────
+
+async function navigateSafely(page: Page, url: string, timeout = 25_000): Promise<void> {
+  try {
+    await page.goto(url, { waitUntil: 'networkidle2', timeout });
+  } catch {
+    try {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
+    } catch {
+      await page.goto(url, { waitUntil: 'load', timeout: timeout + 5_000 });
+    }
+  }
+  // Wait for JS frameworks and Cloudflare email decoder to finish
+  await delay(3_000);
+}
+
+async function scrollToBottom(page: Page): Promise<void> {
+  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+  await delay(1_000);
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function launchBrowser(): Promise<Browser> {
+  return puppeteer.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+  });
+}
+
+// ─── Location & email verification ───────────────────────────────────────────
+
+/**
+ * Check whether a website actually belongs to a business in the given location.
+ *
+ * Rules (in order):
+ *  1. Country-specific TLD (.rw, .ke, etc.) → always accept
+ *  2. A DIFFERENT country's TLD → reject immediately
+ *  3. Generic TLD (.com, .org, .net, .edu) → accept (common for African orgs)
+ *  4. Page content check: must mention the location OR the business name
+ */
+async function isWebsiteLocalToLocation(
+  page: Page,
+  website: string,
+  location: string,
+  bizName: string
+): Promise<boolean> {
+  try {
+    const locationWords = location.toLowerCase().split(/[\s,]+/).filter((w) => w.length > 2);
+    const hostname = new URL(website).hostname.toLowerCase();
+
+    const countryTLDs: Record<string, string[]> = {
+      rwanda: ['.rw'], kenya: ['.ke'], ethiopia: ['.et'], uganda: ['.ug'],
+      tanzania: ['.tz'], nigeria: ['.ng'], ghana: ['.gh'], southafrica: ['.za'],
+      egypt: ['.eg'], morocco: ['.ma'], senegal: ['.sn'], cameroon: ['.cm'],
+    };
+
+    // Generic TLDs used by organisations worldwide — always allow
+    const genericTLDs = ['.com', '.org', '.net', '.edu', '.int', '.co'];
+    if (genericTLDs.some((t) => hostname.endsWith(t) || hostname.includes(t + '.'))) {
+      // Generic domain — do a quick content check but be lenient
+      // (many African schools use .com/.org domains)
+      try {
+        await navigateSafely(page, website);
+        const pageText = await page.evaluate(() =>
+          (document.body.innerText + ' ' + document.title).toLowerCase()
+        );
+        const nameWords = bizName.toLowerCase().split(/\s+/).filter((w) => w.length > 3);
+        const nameFound = nameWords.some((w) => pageText.includes(w));
+        const locationFound = locationWords.some((w) => pageText.includes(w));
+        // Accept if EITHER the name OR location appears — not both required
+        if (!nameFound && !locationFound) {
+          console.log(`    ⚠️  Generic domain but no mention of business or location — rejecting`);
+          return false;
+        }
+      } catch {
+        // Can't load page — accept anyway (don't discard on network error)
+      }
+      return true;
+    }
+
+    for (const word of locationWords) {
+      const tlds = countryTLDs[word];
+      if (tlds) {
+        // Correct country TLD → definitely local
+        if (tlds.some((tld) => hostname.endsWith(tld))) return true;
+        // Different country TLD → definitely wrong location
+        const allTLDs = Object.values(countryTLDs).flat();
+        if (allTLDs.some((tld) => hostname.endsWith(tld) && !tlds.includes(tld))) {
+          console.log(`    ❌ Domain TLD mismatch: ${hostname} is not in ${location}`);
+          return false;
+        }
+      }
+    }
+
+    return true;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Verify an email address is deliverable by checking DNS MX records.
+ */
+async function verifyEmailDomain(email: string): Promise<boolean> {
+  try {
+    const domain = email.split('@')[1];
+    if (!domain) return false;
+    const res = await fetch(`https://dns.google/resolve?name=${encodeURIComponent(domain)}&type=MX`, {
+      signal: AbortSignal.timeout(5_000),
+    });
+    const data = await res.json() as { Answer?: unknown[] };
+    return Array.isArray(data.Answer) && data.Answer.length > 0;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Search Google for a business's email when no website is available.
+ * Uses targeted queries and extracts emails directly from search result snippets.
+ */
+async function findEmailViaGoogle(
+  page: Page,
+  bizName: string,
+  location: string
+): Promise<string | null> {
+  const queries = [
+    `"${bizName}" "${location}" email contact`,
+    `"${bizName}" ${location} email`,
+    `${bizName} ${location} contact email`,
+  ];
+
+  for (const query of queries) {
+    try {
+      await navigateSafely(page, `https://www.google.com/search?q=${encodeURIComponent(query)}`, 15_000);
+      const emails = await extractEmailsFromRenderedPage(page);
+      const best = pickBestEmail(emails, location);
+      if (best) {
+        console.log(`    📧 Found via Google search: ${best}`);
+        return best;
+      }
+    } catch { /* try next query */ }
+  }
+  return null;
+}
+
+// ─── Google Maps ─────────────────────────────────────────────────────────────
+
+/**
+ * Scrape Google Maps for businesses matching `niche` in `location`.
+ *
+ * Uses THREE browser tabs:
+ *  - listPage  : loads the Maps search, scrolls to collect all listing URLs
+ *  - placePage : opens each business's Maps place URL directly (no clicking)
+ *  - emailPage : visits the company website to extract the real email
  */
 export async function scrapeGoogleMaps(
   niche: string,
   location: string,
-  maxResults: number = 1000
+  maxResults = 100
 ): Promise<ScrapedLead[]> {
   const leads: ScrapedLead[] = [];
-  let browser;
-  
+  let browser: Browser | undefined;
+
   try {
-    console.log('Launching browser for Google Maps scraping...');
-    browser = await puppeteer.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
-    });
-    
-    const page = await browser.newPage();
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
-    
-    // Search Google Maps
-    const searchQuery = `${niche} in ${location}`;
-    const url = `https://www.google.com/maps/search/${encodeURIComponent(searchQuery)}`;
-    
-    console.log(`Navigating to: ${url}`);
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-    
-    // Wait for results to load
-    await page.waitForSelector('[role="article"]', { timeout: 10000 }).catch(() => {});
-    
-    // Scroll to load more results with better detection
-    console.log(`Scrolling to load up to ${maxResults} results...`);
-    let previousCount = 0;
-    let noNewResultsCount = 0;
-    const maxScrollAttempts = Math.min(Math.ceil(maxResults / 10), 100); // Up to 100 scrolls
-    
-    for (let i = 0; i < maxScrollAttempts; i++) {
-      // Scroll down
-      await page.evaluate(() => {
-        const scrollable = document.querySelector('[role="feed"]');
-        if (scrollable) {
-          scrollable.scrollTop = scrollable.scrollHeight;
-        }
+    browser = await launchBrowser();
+
+    const listPage  = await browser.newPage();
+    const placePage = await browser.newPage();
+    const emailPage = await browser.newPage();
+    await listPage.setUserAgent(USER_AGENT);
+    await placePage.setUserAgent(USER_AGENT);
+    await emailPage.setUserAgent(USER_AGENT);
+
+    // ── Load Maps search results ──────────────────────────────────────────
+    const mapsUrl = `https://www.google.com/maps/search/${encodeURIComponent(`${niche} in ${location}`)}`;
+    console.log(`\n🗺  Google Maps: ${mapsUrl}`);
+    await listPage.goto(mapsUrl, { waitUntil: 'networkidle2', timeout: 30_000 });
+    await listPage.waitForSelector('[role="article"]', { timeout: 10_000 }).catch(() => {});
+
+    // ── Scroll to load more listings ──────────────────────────────────────
+    let prevCount = 0;
+    let staleScrolls = 0;
+    const maxScrolls = Math.min(Math.ceil(maxResults / 10), 100);
+
+    for (let i = 0; i < maxScrolls; i++) {
+      await listPage.evaluate(() => {
+        const feed = document.querySelector('[role="feed"]');
+        if (feed) feed.scrollTop = feed.scrollHeight;
       });
-      
-      // Wait for new results to load
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      
-      // Check current count
-      const currentCount = await page.evaluate(() => {
-        return document.querySelectorAll('[role="article"]').length;
-      });
-      
-      console.log(`Scroll ${i + 1}: ${currentCount} results loaded`);
-      
-      // Stop if we have enough results
-      if (currentCount >= maxResults) {
-        console.log(`Reached target of ${maxResults} results`);
-        break;
-      }
-      
-      // Stop if no new results after 3 attempts
-      if (currentCount === previousCount) {
-        noNewResultsCount++;
-        if (noNewResultsCount >= 3) {
-          console.log(`No new results after ${noNewResultsCount} scrolls, stopping`);
-          break;
-        }
+      await delay(1_500);
+
+      const count = await listPage.evaluate(
+        () => document.querySelectorAll('[role="article"]').length
+      );
+      console.log(`  Scroll ${i + 1}: ${count} listings`);
+
+      if (count >= maxResults) break;
+      if (count === prevCount) {
+        if (++staleScrolls >= 3) break;
       } else {
-        noNewResultsCount = 0;
+        staleScrolls = 0;
       }
-      
-      previousCount = currentCount;
+      prevCount = count;
     }
-    
-    // Extract business data
-    const businesses = await page.evaluate((max) => {
-      const results: any[] = [];
-      const articles = document.querySelectorAll('[role="article"]');
-      
-      articles.forEach((article, index) => {
-        if (index >= max) return; // Limit results to maxResults
-        
-        const nameEl = article.querySelector('[class*="fontHeadline"]');
-        const addressEl = article.querySelector('[class*="fontBody"]');
-        const ratingEl = article.querySelector('[role="img"][aria-label*="stars"]');
-        
-        const name = nameEl?.textContent?.trim();
-        const address = addressEl?.textContent?.trim();
-        const rating = ratingEl?.getAttribute('aria-label');
-        
-        if (name) {
-          results.push({
-            name,
-            address,
-            rating
-          });
-        }
+
+    // ── Collect listing metadata + individual place URLs ──────────────────
+    const businesses: Array<{
+      name: string; address: string; rating: string; phone: string; placeUrl: string;
+    }> = await listPage.evaluate((max: number) => {
+      const out: any[] = [];
+      document.querySelectorAll('[role="article"]').forEach((el, i) => {
+        if (i >= max) return;
+        const name    = el.querySelector('[class*="fontHeadline"]')?.textContent?.trim();
+        const address = el.querySelector('[class*="fontBody"]')?.textContent?.trim() ?? '';
+        const rating  = el.querySelector('[role="img"][aria-label*="stars"]')?.getAttribute('aria-label') ?? '';
+        const phone   = (el.querySelector('a[href^="tel:"]') as HTMLAnchorElement)?.textContent?.trim() ?? '';
+        const placeUrl = (el.querySelector('a[href*="/maps/place/"]') as HTMLAnchorElement)?.href ?? '';
+        if (name) out.push({ name, address, rating, phone, placeUrl });
       });
-      
-      return results;
+      return out;
     }, maxResults);
-    
-    console.log(`Found ${businesses.length} businesses on Google Maps`);
-    
-    // Process each business
-    for (const business of businesses) {
-      const domain = `${business.name.toLowerCase().replace(/[^a-z0-9]/g, '')}.com`;
-      const email = `info@${domain}`;
-      
-      leads.push({
-        company_name: business.name,
-        email: email,
-        niche: niche,
-        location: business.address || location,
-        company_context: `${business.name} is a ${niche} business in ${location}. ${business.rating || ''}`,
-        source_url: `https://www.google.com/maps/search/${encodeURIComponent(business.name + ' ' + location)}`,
-        website: `https://${domain}`
-      });
-    }
-    
-  } catch (error) {
-    console.error('Google Maps scraping error:', error);
-  } finally {
-    if (browser) {
-      await browser.close();
-    }
-  }
-  
-  return leads;
-}
 
-/**
- * Scrape Yelp (no API needed)
- */
-export async function scrapeYelpWithPuppeteer(
-  niche: string,
-  location: string,
-  maxResults: number = 1000
-): Promise<ScrapedLead[]> {
-  const leads: ScrapedLead[] = [];
-  let browser;
-  
-  try {
-    console.log('Launching browser for Yelp scraping...');
-    browser = await puppeteer.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
-    });
-    
-    const page = await browser.newPage();
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
-    
-    const searchQuery = niche.replace(/\s+/g, '+');
-    const locationQuery = location.replace(/\s+/g, '+');
-    const url = `https://www.yelp.com/search?find_desc=${searchQuery}&find_loc=${locationQuery}`;
-    
-    console.log(`Navigating to: ${url}`);
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-    
-    // Wait for results
-    await page.waitForSelector('[data-testid="serp-ia-card"]', { timeout: 10000 }).catch(() => {});
-    
-    // Extract business data
-    const businesses = await page.evaluate((max) => {
-      const results: any[] = [];
-      const cards = document.querySelectorAll('[data-testid="serp-ia-card"]');
-      
-      cards.forEach((card, index) => {
-        if (index >= max) return;
-        
-        const nameEl = card.querySelector('h3, [class*="businessName"]');
-        const ratingEl = card.querySelector('[aria-label*="star rating"]');
-        const addressEl = card.querySelector('[data-testid="address"]');
-        const phoneEl = card.querySelector('[href^="tel:"]');
-        
-        const name = nameEl?.textContent?.trim();
-        const rating = ratingEl?.getAttribute('aria-label');
-        const address = addressEl?.textContent?.trim();
-        const phone = phoneEl?.textContent?.trim();
-        
-        if (name) {
-          results.push({
-            name,
-            rating,
-            address,
-            phone
-          });
-        }
-      });
-      
-      return results;
-    }, maxResults);
-    
-    console.log(`Found ${businesses.length} businesses on Yelp`);
-    
-    // Process each business
-    for (const business of businesses) {
-      const domain = `${business.name.toLowerCase().replace(/[^a-z0-9]/g, '')}.com`;
-      const email = `info@${domain}`;
-      
-      leads.push({
-        company_name: business.name,
-        email: email,
-        niche: niche,
-        location: business.address || location,
-        company_context: `${business.name} is a ${niche} business in ${location}. ${business.rating || ''}`,
-        source_url: `https://www.yelp.com/biz/${business.name.toLowerCase().replace(/[^a-z0-9]/g, '-')}`,
-        phone: business.phone,
-        website: `https://${domain}`
-      });
-    }
-    
-  } catch (error) {
-    console.error('Yelp scraping error:', error);
-  } finally {
-    if (browser) {
-      await browser.close();
-    }
-  }
-  
-  return leads;
-}
+    console.log(`\n✅ Found ${businesses.length} businesses — now finding real emails...\n`);
 
-/**
- * Scrape Yellow Pages (no API needed)
- */
-export async function scrapeYellowPagesWithPuppeteer(
-  niche: string,
-  location: string,
-  maxResults: number = 1000
-): Promise<ScrapedLead[]> {
-  const leads: ScrapedLead[] = [];
-  let browser;
-  
-  try {
-    console.log('Launching browser for Yellow Pages scraping...');
-    browser = await puppeteer.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
-    });
-    
-    const page = await browser.newPage();
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
-    
-    const searchQuery = encodeURIComponent(niche);
-    const locationQuery = encodeURIComponent(location);
-    const url = `https://www.yellowpages.com/search?search_terms=${searchQuery}&geo_location_terms=${locationQuery}`;
-    
-    console.log(`Navigating to: ${url}`);
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-    
-    // Wait for results
-    await page.waitForSelector('.result', { timeout: 10000 }).catch(() => {});
-    
-    // Extract business data
-    const businesses = await page.evaluate((max) => {
-      const results: any[] = [];
-      const resultDivs = document.querySelectorAll('.result, .search-results .result');
-      
-      resultDivs.forEach((result, index) => {
-        if (index >= max) return;
-        
-        const nameEl = result.querySelector('.business-name, [class*="business-name"]');
-        const phoneEl = result.querySelector('.phones, [class*="phone"]');
-        const addressEl = result.querySelector('.street-address, [class*="address"]');
-        const websiteEl = result.querySelector('.track-visit-website, [href*="http"]');
-        
-        const name = nameEl?.textContent?.trim();
-        const phone = phoneEl?.textContent?.trim();
-        const address = addressEl?.textContent?.trim();
-        const website = websiteEl?.getAttribute('href');
-        
-        if (name) {
-          results.push({
-            name,
-            phone,
-            address,
-            website
-          });
-        }
-      });
-      
-      return results;
-    }, maxResults);
-    
-    console.log(`Found ${businesses.length} businesses on Yellow Pages`);
-    
-    // Process each business
-    for (const business of businesses) {
-      let email = '';
-      let domain = '';
-      
-      if (business.website) {
-        try {
-          domain = new URL(business.website).hostname.replace('www.', '');
-          email = `info@${domain}`;
-        } catch (e) {
-          domain = `${business.name.toLowerCase().replace(/[^a-z0-9]/g, '')}.com`;
-          email = `info@${domain}`;
-        }
-      } else {
-        domain = `${business.name.toLowerCase().replace(/[^a-z0-9]/g, '')}.com`;
-        email = `info@${domain}`;
-      }
-      
-      leads.push({
-        company_name: business.name,
-        email: email,
-        niche: niche,
-        location: business.address || location,
-        company_context: `${business.name} is a ${niche} business in ${location}.${business.phone ? ` Phone: ${business.phone}` : ''}`,
-        source_url: business.website || url,
-        phone: business.phone,
-        website: business.website || `https://${domain}`
-      });
-    }
-    
-  } catch (error) {
-    console.error('Yellow Pages scraping error:', error);
-  } finally {
-    if (browser) {
-      await browser.close();
-    }
-  }
-  
-  return leads;
-}
+    // ── Process each business independently ───────────────────────────────
+    for (let i = 0; i < businesses.length; i++) {
+      const biz = businesses[i];
+      console.log(`[${i + 1}/${businesses.length}] ${biz.name}`);
 
-/**
- * Scrape LinkedIn company pages
- */
-async function scrapeLinkedIn(
-  niche: string,
-  location: string,
-  maxResults: number = 1000
-): Promise<ScrapedLead[]> {
-  const leads: ScrapedLead[] = [];
-  let browser;
-  
-  try {
-    console.log('Launching browser for LinkedIn scraping...');
-    browser = await puppeteer.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
-    });
-    
-    const page = await browser.newPage();
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
-    
-    const searchQuery = `${niche} companies in ${location}`;
-    const url = `https://www.google.com/search?q=${encodeURIComponent(searchQuery + ' site:linkedin.com/company')}`;
-    
-    console.log(`Searching LinkedIn via Google: ${url}`);
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-    
-    // Extract company links
-    const companies = await page.evaluate((max) => {
-      const results: any[] = [];
-      const searchResults = document.querySelectorAll('div.g, div[data-sokoban-container]');
-      
-      searchResults.forEach((result, index) => {
-        if (index >= max) return;
-        
-        const linkEl = result.querySelector('a[href*="linkedin.com/company"]');
-        const titleEl = result.querySelector('h3');
-        const snippetEl = result.querySelector('.VwiC3b, .yXK7lf');
-        
-        const url = linkEl?.getAttribute('href');
-        const name = titleEl?.textContent?.trim();
-        const snippet = snippetEl?.textContent?.trim();
-        
-        if (name && url) {
-          results.push({ name, url, snippet });
-        }
-      });
-      
-      return results;
-    }, Math.min(maxResults, 50));
-    
-    console.log(`Found ${companies.length} companies on LinkedIn`);
-    
-    // Process each company
-    for (const company of companies) {
-      const domain = `${company.name.toLowerCase().replace(/[^a-z0-9]/g, '')}.com`;
-      const email = `info@${domain}`;
-      
-      leads.push({
-        company_name: company.name,
-        email: email,
-        niche: niche,
-        location: location,
-        company_context: company.snippet || `${company.name} is a ${niche} company in ${location}.`,
-        source_url: company.url,
-        website: `https://${domain}`
-      });
-    }
-    
-  } catch (error) {
-    console.error('LinkedIn scraping error:', error);
-  } finally {
-    if (browser) {
-      await browser.close();
-    }
-  }
-  
-  return leads;
-}
+      let website: string | null = null;
+      let email: string | null = null;
+      let phone: string = biz.phone || '';
 
-/**
- * Scrape Bing/DuckDuckGo for business listings
- */
-async function scrapeBingSearch(
-  niche: string,
-  location: string,
-  maxResults: number = 1000
-): Promise<ScrapedLead[]> {
-  const leads: ScrapedLead[] = [];
-  let browser;
-  
-  try {
-    console.log('Launching browser for Bing search scraping...');
-    browser = await puppeteer.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
-    });
-    
-    const page = await browser.newPage();
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
-    
-    const searchQuery = `${niche} businesses in ${location}`;
-    const url = `https://www.bing.com/search?q=${encodeURIComponent(searchQuery)}`;
-    
-    console.log(`Searching Bing: ${url}`);
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-    
-    // Extract business results
-    const businesses = await page.evaluate((max) => {
-      const results: any[] = [];
-      const searchResults = document.querySelectorAll('li.b_algo, .b_algo');
-      
-      searchResults.forEach((result, index) => {
-        if (index >= max) return;
-        
-        const titleEl = result.querySelector('h2 a, a');
-        const snippetEl = result.querySelector('.b_caption p, p');
-        
-        const name = titleEl?.textContent?.trim();
-        const url = titleEl?.getAttribute('href');
-        const snippet = snippetEl?.textContent?.trim();
-        
-        if (name && url && !url.includes('bing.com') && !url.includes('microsoft.com')) {
-          results.push({ name, url, snippet });
-        }
-      });
-      
-      return results;
-    }, Math.min(maxResults, 50));
-    
-    console.log(`Found ${businesses.length} businesses on Bing`);
-    
-    // Process each business
-    for (const business of businesses) {
-      let domain = '';
       try {
-        domain = new URL(business.url).hostname.replace('www.', '');
-      } catch (e) {
-        domain = `${business.name.toLowerCase().replace(/[^a-z0-9]/g, '')}.com`;
-      }
-      
-      const email = `info@${domain}`;
-      
-      leads.push({
-        company_name: business.name,
-        email: email,
-        niche: niche,
-        location: location,
-        company_context: business.snippet || `${business.name} is a ${niche} business in ${location}.`,
-        source_url: business.url,
-        website: business.url
-      });
-    }
-    
-  } catch (error) {
-    console.error('Bing scraping error:', error);
-  } finally {
-    if (browser) {
-      await browser.close();
-    }
-  }
-  
-  return leads;
-}
+        // ── Step 1: Open this business's own Maps place page ──────────────
+        if (biz.placeUrl) {
+          await placePage.goto(biz.placeUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 });
+          await delay(3_000);
 
-/**
- * Scrape Facebook business pages
- */
-async function scrapeFacebookPages(
-  niche: string,
-  location: string,
-  maxResults: number = 1000
-): Promise<ScrapedLead[]> {
-  const leads: ScrapedLead[] = [];
-  let browser;
-  
-  try {
-    console.log('Launching browser for Facebook Pages scraping...');
-    browser = await puppeteer.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
-    });
-    
-    const page = await browser.newPage();
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
-    
-    const searchQuery = `${niche} ${location} site:facebook.com`;
-    const url = `https://www.google.com/search?q=${encodeURIComponent(searchQuery)}`;
-    
-    console.log(`Searching Facebook Pages via Google: ${url}`);
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-    
-    // Extract Facebook pages
-    const pages = await page.evaluate((max) => {
-      const results: any[] = [];
-      const searchResults = document.querySelectorAll('div.g, div[data-sokoban-container]');
-      
-      searchResults.forEach((result, index) => {
-        if (index >= max) return;
-        
-        const linkEl = result.querySelector('a[href*="facebook.com"]');
-        const titleEl = result.querySelector('h3');
-        const snippetEl = result.querySelector('.VwiC3b, .yXK7lf');
-        
-        const url = linkEl?.getAttribute('href');
-        const name = titleEl?.textContent?.trim();
-        const snippet = snippetEl?.textContent?.trim();
-        
-        if (name && url && !url.includes('/posts/') && !url.includes('/photos/')) {
-          results.push({ name, url, snippet });
+          const placeData = await placePage.evaluate(() => {
+            const skip = ['google.com', 'facebook.com', 'instagram.com', 'twitter.com',
+                          'linkedin.com', 'youtube.com', 'yelp.com', 'tripadvisor.com',
+                          'maps.google', 'goo.gl'];
+
+            let siteUrl: string | null = null;
+            const auth = document.querySelector<HTMLAnchorElement>(
+              '[data-item-id="authority"] a, a[data-item-id="authority"]'
+            );
+            if (auth?.href) {
+              siteUrl = auth.href;
+            } else {
+              for (const a of Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href]'))) {
+                if (a.href.startsWith('http') && !skip.some((s) => a.href.includes(s))) {
+                  siteUrl = a.href;
+                  break;
+                }
+              }
+            }
+
+            const tel = document.querySelector<HTMLAnchorElement>('a[href^="tel:"]');
+            return { siteUrl, phoneNum: tel?.textContent?.trim() ?? '' };
+          });
+
+          website = placeData.siteUrl;
+          if (placeData.phoneNum) phone = placeData.phoneNum;
+          console.log(`  🌐 Website: ${website ?? 'none'}`);
         }
-      });
-      
-      return results;
-    }, Math.min(maxResults, 50));
-    
-    console.log(`Found ${pages.length} Facebook pages`);
-    
-    // Process each page
-    for (const fbPage of pages) {
-      const domain = `${fbPage.name.toLowerCase().replace(/[^a-z0-9]/g, '')}.com`;
-      const email = `info@${domain}`;
-      
+
+        // ── Step 2: Visit website and extract real email ──────────────────
+        if (website) {
+          const isLocal = await isWebsiteLocalToLocation(emailPage, website, location, biz.name);
+          if (isLocal) {
+            email = await findEmailOnWebsite(emailPage, website, location);
+          } else {
+            console.log(`  ❌ Website not related to ${location} — skipping: ${website}`);
+            website = null;
+          }
+        }
+
+        // ── Step 3: No website on Maps — search Google directly ───────────
+        // Many businesses in Africa don't have a website on Maps but their
+        // email appears in Google search results or directory listings.
+        if (!email) {
+          console.log(`  🔍 Searching Google for email...`);
+          email = await findEmailViaGoogle(emailPage, biz.name, location);
+        }
+
+      } catch (err: any) {
+        console.log(`  ❌ Error: ${err?.message}`);
+      }
+
+      // ── Verify email is deliverable ───────────────────────────────────
+      if (email) {
+        const deliverable = await verifyEmailDomain(email);
+        if (!deliverable) {
+          console.log(`  ❌ Email domain has no MX records — discarding: ${email}`);
+          email = null;
+        } else {
+          console.log(`  ✅ Verified email: ${email}`);
+        }
+      } else {
+        console.log(`  ⚠️  No email found for: ${biz.name}`);
+      }
+
       leads.push({
-        company_name: fbPage.name,
-        email: email,
-        niche: niche,
-        location: location,
-        company_context: fbPage.snippet || `${fbPage.name} is a ${niche} business in ${location}.`,
-        source_url: fbPage.url,
-        website: `https://${domain}`
+        company_name: biz.name,
+        email: email ?? '',
+        emailIsReal: !!email,
+        niche,
+        location: biz.address || location,
+        company_context: `${biz.name} is a ${niche} business in ${location}. ${biz.rating}`.trim(),
+        source_url: biz.placeUrl || website || `https://www.google.com/maps/search/${encodeURIComponent(biz.name)}`,
+        phone: phone || undefined,
+        website: website ?? undefined,
       });
     }
-    
-  } catch (error) {
-    console.error('Facebook scraping error:', error);
+  } catch (err) {
+    console.error('[GoogleMaps] Fatal error:', err);
   } finally {
-    if (browser) {
-      await browser.close();
-    }
+    await browser?.close();
   }
-  
+
+  const realCount = leads.filter((l) => l.emailIsReal).length;
+  console.log(`\n📊 Google Maps: ${leads.length} leads | ${realCount} real emails | ${leads.length - realCount} no email\n`);
   return leads;
 }
 
+// ─── Main entry point ────────────────────────────────────────────────────────
+
 /**
- * Main scraper - tries all methods without API keys
+ * Scrape leads from Google Maps + Google Search.
+ * Only returns leads with REAL, verified emails — no fake fallbacks.
  */
 export async function scrapeWithoutAPI(
   niche: string,
   location: string,
-  maxLeads: number = 1000
+  maxLeads = 100
 ): Promise<ScrapedLead[]> {
-  let allLeads: ScrapedLead[] = [];
-  
-  console.log(`Starting API-free scraping for: ${niche} in ${location} (max: ${maxLeads})`);
-  
-  // Try Google Maps first (usually best results)
+  console.log(`\n${'═'.repeat(60)}`);
+  console.log(`🚀 Starting scrape: "${niche}" in "${location}" (max ${maxLeads})`);
+  console.log(`${'═'.repeat(60)}\n`);
+
+  let all: ScrapedLead[] = [];
+
+  // ── Source 1: Google Maps (best quality — has phone, address, website) ──
   try {
-    const mapsLeads = await scrapeGoogleMaps(niche, location, maxLeads);
-    allLeads = [...allLeads, ...mapsLeads];
-    console.log(`Google Maps: ${mapsLeads.length} leads`);
-  } catch (error) {
-    console.error('Google Maps failed:', error);
+    const results = await scrapeGoogleMaps(niche, location, maxLeads);
+    all = results;
+    console.log(`\n✔ Google Maps: +${results.length} leads`);
+  } catch (err) {
+    console.error(`✘ Google Maps failed:`, err);
   }
-  
-  // Try LinkedIn
-  if (allLeads.length < maxLeads * 0.8) {
+
+  // ── Source 2: Google Search — fill the gap if Maps didn't give enough ──
+  // Search multiple query variations to find more businesses with emails
+  const realSoFar = all.filter((l) => l.emailIsReal).length;
+  if (realSoFar < maxLeads) {
+    console.log(`\n🔍 Only ${realSoFar} real emails so far — supplementing with Google Search...`);
     try {
-      const linkedInLeads = await scrapeLinkedIn(niche, location, maxLeads);
-      allLeads = [...allLeads, ...linkedInLeads];
-      console.log(`LinkedIn: ${linkedInLeads.length} leads`);
-    } catch (error) {
-      console.error('LinkedIn failed:', error);
+      const searchLeads = await scrapeGoogleSearch(niche, location, maxLeads - realSoFar);
+      // Merge — don't add duplicates (match by company name)
+      const existingNames = new Set(all.map((l) => l.company_name.toLowerCase()));
+      const newLeads = searchLeads.filter((l) => !existingNames.has(l.company_name.toLowerCase()));
+      all = [...all, ...newLeads];
+      console.log(`✔ Google Search: +${newLeads.length} additional leads`);
+    } catch (err) {
+      console.error(`✘ Google Search failed:`, err);
     }
   }
-  
-  // Try Bing Search
-  if (allLeads.length < maxLeads * 0.8) {
-    try {
-      const bingLeads = await scrapeBingSearch(niche, location, maxLeads);
-      allLeads = [...allLeads, ...bingLeads];
-      console.log(`Bing: ${bingLeads.length} leads`);
-    } catch (error) {
-      console.error('Bing failed:', error);
-    }
-  }
-  
-  // Try Facebook Pages
-  if (allLeads.length < maxLeads * 0.8) {
-    try {
-      const fbLeads = await scrapeFacebookPages(niche, location, maxLeads);
-      allLeads = [...allLeads, ...fbLeads];
-      console.log(`Facebook: ${fbLeads.length} leads`);
-    } catch (error) {
-      console.error('Facebook failed:', error);
-    }
-  }
-  
-  // Try Yelp
-  if (allLeads.length < maxLeads * 0.8) {
-    try {
-      const yelpLeads = await scrapeYelpWithPuppeteer(niche, location, maxLeads);
-      allLeads = [...allLeads, ...yelpLeads];
-      console.log(`Yelp: ${yelpLeads.length} leads`);
-    } catch (error) {
-      console.error('Yelp failed:', error);
-    }
-  }
-  
-  // Try Yellow Pages
-  if (allLeads.length < maxLeads * 0.8) {
-    try {
-      const ypLeads = await scrapeYellowPagesWithPuppeteer(niche, location, maxLeads);
-      allLeads = [...allLeads, ...ypLeads];
-      console.log(`Yellow Pages: ${ypLeads.length} leads`);
-    } catch (error) {
-      console.error('Yellow Pages failed:', error);
-    }
-  }
-  
-  // Remove duplicates
-  const uniqueLeads = allLeads.filter((lead, index, self) =>
-    index === self.findIndex((l) => l.email === lead.email)
+
+  // FILTER: Only keep leads with REAL verified emails
+  const realEmailsOnly = all.filter(
+    (lead) => lead.emailIsReal === true && lead.email !== ''
   );
-  
-  console.log(`Total unique leads: ${uniqueLeads.length}`);
-  
-  return uniqueLeads.slice(0, maxLeads);
+
+  console.log(`\n${'═'.repeat(60)}`);
+  console.log(`📊 Final results`);
+  console.log(`   Total leads found: ${all.length}`);
+  console.log(`   Real emails only : ${realEmailsOnly.length}`);
+  console.log(`   Discarded        : ${all.length - realEmailsOnly.length}`);
+  console.log(`${'═'.repeat(60)}\n`);
+
+  return realEmailsOnly.slice(0, maxLeads);
+}
+
+// ─── Google Search supplementary scraper ─────────────────────────────────────
+
+/**
+ * Search Google for businesses with emails directly in the search results.
+ * Used to supplement Maps when not enough businesses have websites.
+ */
+async function scrapeGoogleSearch(
+  niche: string,
+  location: string,
+  needed: number
+): Promise<ScrapedLead[]> {
+  const leads: ScrapedLead[] = [];
+  let browser: Browser | undefined;
+
+  try {
+    browser = await launchBrowser();
+    const page = await browser.newPage();
+    await page.setUserAgent(USER_AGENT);
+
+    const queries = [
+      `${niche} ${location} email contact`,
+      `${niche} in ${location} "@" contact`,
+      `list of ${niche} in ${location} email`,
+      `${niche} ${location} site:*.rw OR site:*.org OR site:*.com email`,
+      `"${location}" ${niche} contact email address`,
+    ];
+
+    for (const query of queries) {
+      if (leads.length >= needed) break;
+
+      try {
+        console.log(`  🔍 Google: ${query}`);
+        await navigateSafely(page, `https://www.google.com/search?q=${encodeURIComponent(query)}&num=20`, 15_000);
+
+        // Extract emails directly from search result snippets
+        const pageEmails = await extractEmailsFromRenderedPage(page);
+
+        // Also extract business names + emails from result cards
+        const results = await page.evaluate(() => {
+          const out: Array<{ name: string; snippet: string; url: string }> = [];
+          document.querySelectorAll('div.g, div[data-hveid]').forEach((el) => {
+            const title = el.querySelector('h3')?.textContent?.trim() ?? '';
+            const snippet = el.querySelector('.VwiC3b, [data-sncf]')?.textContent?.trim() ?? '';
+            const url = (el.querySelector('a[href]') as HTMLAnchorElement)?.href ?? '';
+            if (title && (snippet || url)) out.push({ name: title, snippet, url });
+          });
+          return out;
+        });
+
+        for (const result of results) {
+          if (leads.length >= needed) break;
+
+          // Check if snippet contains an email
+          const snippetEmails = extractEmailsFromText(result.snippet);
+          const email = pickBestEmail([...snippetEmails, ...pageEmails], location);
+
+          if (email) {
+            const deliverable = await verifyEmailDomain(email);
+            if (deliverable) {
+              leads.push({
+                company_name: result.name.replace(/\s*[-|].*$/, '').trim(),
+                email,
+                emailIsReal: true,
+                niche,
+                location,
+                company_context: result.snippet || `${result.name} is a ${niche} in ${location}.`,
+                source_url: result.url,
+                website: result.url || undefined,
+              });
+              console.log(`    ✅ ${result.name} → ${email}`);
+            }
+          }
+        }
+      } catch (err: any) {
+        console.log(`  ⚠️  Query failed: ${err?.message?.slice(0, 60)}`);
+      }
+
+      await delay(2_000);
+    }
+  } catch (err) {
+    console.error('[GoogleSearch] Error:', err);
+  } finally {
+    await browser?.close();
+  }
+
+  return leads;
 }

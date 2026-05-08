@@ -30,11 +30,14 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
   const [categories, setCategories] = useState<string[]>([]);
   const [mode, setMode]             = useState<"single" | "bulk" | "manual">("single");
 
+  // ── Sender profile (saved once, shared across single + bulk) ─────────────
+  const [yourCompany, setYourCompany]   = useState("");
+  const [yourService, setYourService]   = useState("");
+  const [profileSaved, setProfileSaved] = useState(false);
+
   // ── Single mode ───────────────────────────────────────────────────────────
   const [selectedLead, setSelectedLead]       = useState<Lead | null>(preloadedLead || null);
   const [tone, setTone]                       = useState<ToneType>("Direct");
-  const [yourCompany, setYourCompany]         = useState("");
-  const [yourService, setYourService]         = useState("");
   const [customPainPoint, setCustomPainPoint] = useState("");
   const [isGenerating, setIsGenerating]       = useState(false);
   const [generatedEmail, setGeneratedEmail]   = useState<{ subject: string; body: string; model: string } | null>(null);
@@ -48,7 +51,6 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
   const [isSendingSingle, setIsSendingSingle] = useState(false);
   const [isEnriching, setIsEnriching]         = useState(false);
   const [enriched, setEnriched]               = useState(false);
-  // Custom recipient override for single mode
   const [useCustomRecipient, setUseCustomRecipient] = useState(false);
   const [customRecipient, setCustomRecipient]       = useState("");
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -64,14 +66,12 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
   const [bulkEmails, setBulkEmails]           = useState<any[]>([]);
   const [previewIndex, setPreviewIndex]       = useState(0);
   const [isSendingBulk, setIsSendingBulk]     = useState(false);
-  const [bulkYourCompany, setBulkYourCompany] = useState("");
-  const [bulkYourService, setBulkYourService] = useState("");
   const [bulkTone, setBulkTone]               = useState<ToneType>("Direct");
   const [bulkPainPoint, setBulkPainPoint]     = useState("");
   const [categoryFilter, setCategoryFilter]   = useState("all");
 
   // ── Init ──────────────────────────────────────────────────────────────────
-  useEffect(() => { fetchLeads(); }, []);
+  useEffect(() => { fetchLeads(); loadSenderProfile(); }, []);
 
   useEffect(() => {
     if (preloadedLead) {
@@ -92,6 +92,29 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
         Array.from(new Set(data.map((l: Lead) => l.niche).filter((n): n is string => Boolean(n))))
       );
     }
+  };
+
+  /** Load saved company/service from user profile so users don't re-enter every time */
+  const loadSenderProfile = async () => {
+    const { data } = await supabase
+      .from("users")
+      .select("sender_company, sender_service")
+      .eq("id", userId)
+      .single();
+    if (data) {
+      if (data.sender_company) setYourCompany(data.sender_company);
+      if (data.sender_service) setYourService(data.sender_service);
+    }
+  };
+
+  /** Save company/service to user profile */
+  const saveSenderProfile = async (company: string, service: string) => {
+    await supabase
+      .from("users")
+      .update({ sender_company: company, sender_service: service })
+      .eq("id", userId);
+    setProfileSaved(true);
+    setTimeout(() => setProfileSaved(false), 2000);
   };
 
   const filteredLeads = categoryFilter === "all"
@@ -116,20 +139,31 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
   };
 
   const handleSendError = (res: Response, data: any) => {
-    if (res.status === 429)      toast.error("Daily SMTP limit reached. Try again tomorrow.");
-    else if (res.status === 404) toast.error("No SMTP accounts configured. Add one in SMTP Manager.");
-    else                         toast.error(data.error || "Failed to send email");
+    if (res.status === 429) {
+      toast.error("Daily SMTP limit reached. Try again tomorrow.");
+    } else if (
+      res.status === 400 &&
+      data?.error?.toLowerCase().includes("no smtp accounts")
+    ) {
+      toast.error("No SMTP accounts configured. Add one in SMTP Manager.");
+    } else {
+      toast.error(data?.error || "Failed to send email");
+    }
   };
 
   // ── Single: generate ──────────────────────────────────────────────────────
   const generateEmail = async () => {
     if (!selectedLead) { toast.error("Select a lead first"); return; }
-    if (!yourCompany.trim()) { toast.error("Enter your company name"); return; }
-    if (!yourService.trim()) { toast.error("Enter your service / product"); return; }
+    if (!yourCompany.trim() || !yourService.trim()) {
+      toast.error("Fill in Your Company and Service above — saved once for all emails");
+      return;
+    }
     setIsGenerating(true);
     setGeneratedEmail(null);
     setIsEditing(false);
     try {
+      // Auto-save profile when generating
+      await saveSenderProfile(yourCompany, yourService);
       const { generateAIEmail } = await import("@/utils/ai-email-generator");
       const { subject, body } = await generateAIEmail({
         lead: {
@@ -170,15 +204,39 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
         }),
       });
       const data = await res.json();
-      if (data.success && data.enriched) {
-        const updated: Lead = { ...lead, email: data.email ?? lead.email, company_context: data.company_context ?? lead.company_context };
+      
+      if (!data.success) {
+        toast.error(data.error || "Enrichment failed");
+        return;
+      }
+      
+      if (data.enriched) {
+        const updated: Lead = { 
+          ...lead, 
+          email: data.email ?? lead.email, 
+          company_context: data.company_context ?? lead.company_context 
+        };
         setSelectedLead(updated);
         setLeads((prev) => prev.map((l) => (l.id === lead.id ? updated : l)));
         setEnriched(true);
-        if (data.email && data.email !== lead.email) toast.success("Found email: " + data.email);
+        
+        if (data.email && data.email !== lead.email) {
+          toast.success(`✓ Found real email: ${data.email}`);
+        } else if (data.company_context) {
+          toast.success("✓ Added company context");
+        } else {
+          toast.info("Enriched, but no new email found");
+        }
+      } else {
+        setEnriched(true);
+        toast.warning("No email found on website. Try using a custom email.");
       }
-    } catch { /* silent */ }
-    finally { setIsEnriching(false); }
+    } catch (err) {
+      console.error("Enrichment error:", err);
+      toast.error("Failed to enrich lead");
+    } finally { 
+      setIsEnriching(false); 
+    }
   };
 
   const copyEmail = async () => {
@@ -215,16 +273,26 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipient)) { toast.error("Invalid email address"); return; }
     setIsSendingSingle(true);
     try {
+      // Only pass leadId if the lead is actually saved in the DB (has a real UUID)
+      // Leads from the scraper results panel are NOT saved until "Add to CRM" is clicked
+      const isDbLead = selectedLead?.id && !useCustomRecipient;
       const { res, data } = await callSendEmail(
         recipient,
         isEditing ? editSubject : generatedEmail.subject,
         isEditing ? editBody : generatedEmail.body,
-        !useCustomRecipient ? selectedLead?.id : undefined
+        isDbLead ? selectedLead!.id : undefined
       );
       if (data.success) {
         toast.success("Sent to " + recipient + " via " + data.accountUsed);
-        if (!useCustomRecipient && selectedLead) {
-          setSelectedLead({ ...selectedLead, status: "Email Sent" });
+        // Update local lead status immediately — don't wait for CRM refresh
+        const updatedLeadId = data.leadId ?? (isDbLead ? selectedLead!.id : null);
+        if (updatedLeadId) {
+          setSelectedLead((prev) => prev ? { ...prev, status: "Email Sent" } : prev);
+          setLeads((prev) => prev.map((l) =>
+            l.id === updatedLeadId ? { ...l, status: "Email Sent" } : l
+          ));
+        }
+        if (isDbLead && selectedLead) {
           await supabase.from("generated_emails").insert({
             user_id: userId, lead_id: selectedLead.id,
             subject: isEditing ? editSubject : generatedEmail.subject,
@@ -267,7 +335,8 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
 
   const generateBulkEmails = async () => {
     if (selectedLeadIds.size === 0) { toast.error("Select at least one lead"); return; }
-    if (!bulkYourCompany || !bulkYourService) { toast.error("Enter your company name and service"); return; }
+    if (!yourCompany || !yourService) { toast.error("Fill in Your Company and Service in the profile section"); return; }
+    await saveSenderProfile(yourCompany, yourService);
     setIsGenerating(true);
     setBulkEmails([]);
     try {
@@ -282,104 +351,60 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
           const { generateAIEmail } = await import("@/utils/ai-email-generator");
           const { subject, body } = await generateAIEmail({
             lead: { company_name: lead.company_name, niche: lead.niche, location: lead.location, company_context: lead.company_context },
-            yourCompany: bulkYourCompany,
-            yourService: bulkYourService,
+            yourCompany,
+            yourService,
             tone: bulkTone,
             customPainPoint: bulkPainPoint || undefined,
             userId,
           });
           emails.push({ 
-            lead, 
-            lead_email: lead.email, 
-            company_name: lead.company_name, 
-            subject, 
-            body, 
-            model: "AI",
-            isEditing: false,
-            editSubject: subject,
-            editBody: body,
+            lead, lead_email: lead.email, company_name: lead.company_name, 
+            subject, body, model: "AI", isEditing: false,
+            editSubject: subject, editBody: body,
           });
           successCount++;
-          
-          // Add delay between requests to avoid rate limits (1.5 seconds)
-          if (i < selected.length - 1) {
-            await new Promise(resolve => setTimeout(resolve, 1500));
-          }
+          if (i < selected.length - 1) await new Promise(resolve => setTimeout(resolve, 1500));
         } catch (error: any) {
           failCount++;
-          // If rate limit error, add longer delay and retry once
           if (error.message?.includes('rate limit')) {
-            toast.warning(`Rate limit hit. Waiting 5 seconds before continuing...`);
+            toast.warning(`Rate limit hit. Waiting 5 seconds…`);
             await new Promise(resolve => setTimeout(resolve, 5000));
-            
-            // Retry this lead
             try {
               const { generateAIEmail } = await import("@/utils/ai-email-generator");
               const { subject, body } = await generateAIEmail({
                 lead: { company_name: lead.company_name, niche: lead.niche, location: lead.location, company_context: lead.company_context },
-                yourCompany: bulkYourCompany,
-                yourService: bulkYourService,
-                tone: bulkTone,
-                customPainPoint: bulkPainPoint || undefined,
-                userId,
+                yourCompany, yourService, tone: bulkTone,
+                customPainPoint: bulkPainPoint || undefined, userId,
               });
-              emails.push({ 
-                lead, 
-                lead_email: lead.email, 
-                company_name: lead.company_name, 
-                subject, 
-                body, 
-                model: "AI",
-                isEditing: false,
-                editSubject: subject,
-                editBody: body,
-              });
-              successCount++;
-              failCount--;
+              emails.push({ lead, lead_email: lead.email, company_name: lead.company_name, subject, body, model: "AI", isEditing: false, editSubject: subject, editBody: body });
+              successCount++; failCount--;
             } catch {
-              // Use fallback if retry fails
-              emails.push({ 
-                lead, 
-                lead_email: lead.email, 
-                company_name: lead.company_name, 
-                subject: "Quick question about " + lead.company_name, 
-                body: "Hi,\n\nI came across " + lead.company_name + " and wanted to reach out about " + bulkYourService + ".\n\nWould you be open to a quick call?\n\nBest,\n" + bulkYourCompany, 
-                model: "Fallback",
-                isEditing: false,
-                editSubject: "Quick question about " + lead.company_name,
-                editBody: "Hi,\n\nI came across " + lead.company_name + " and wanted to reach out about " + bulkYourService + ".\n\nWould you be open to a quick call?\n\nBest,\n" + bulkYourCompany,
+              emails.push({ lead, lead_email: lead.email, company_name: lead.company_name,
+                subject: `Quick question about ${lead.company_name}`,
+                body: `Hi,\n\nI came across ${lead.company_name} and wanted to reach out about ${yourService}.\n\nWould you be open to a quick call?\n\nBest,\n${yourCompany}`,
+                model: "Fallback", isEditing: false,
+                editSubject: `Quick question about ${lead.company_name}`,
+                editBody: `Hi,\n\nI came across ${lead.company_name} and wanted to reach out about ${yourService}.\n\nWould you be open to a quick call?\n\nBest,\n${yourCompany}`,
               });
             }
           } else {
-            // Use fallback for other errors
-            emails.push({ 
-              lead, 
-              lead_email: lead.email, 
-              company_name: lead.company_name, 
-              subject: "Quick question about " + lead.company_name, 
-              body: "Hi,\n\nI came across " + lead.company_name + " and wanted to reach out about " + bulkYourService + ".\n\nWould you be open to a quick call?\n\nBest,\n" + bulkYourCompany, 
-              model: "Fallback",
-              isEditing: false,
-              editSubject: "Quick question about " + lead.company_name,
-              editBody: "Hi,\n\nI came across " + lead.company_name + " and wanted to reach out about " + bulkYourService + ".\n\nWould you be open to a quick call?\n\nBest,\n" + bulkYourCompany,
+            emails.push({ lead, lead_email: lead.email, company_name: lead.company_name,
+              subject: `Quick question about ${lead.company_name}`,
+              body: `Hi,\n\nI came across ${lead.company_name} and wanted to reach out about ${yourService}.\n\nWould you be open to a quick call?\n\nBest,\n${yourCompany}`,
+              model: "Fallback", isEditing: false,
+              editSubject: `Quick question about ${lead.company_name}`,
+              editBody: `Hi,\n\nI came across ${lead.company_name} and wanted to reach out about ${yourService}.\n\nWould you be open to a quick call?\n\nBest,\n${yourCompany}`,
             });
           }
         }
-        
-        // Update progress
         setBulkEmails([...emails]);
       }
       
       setPreviewIndex(0);
-      if (failCount > 0) {
-        toast.success(`Generated ${successCount} emails (${failCount} used fallback)`);
-      } else {
-        toast.success(`Generated ${emails.length} emails successfully!`);
-      }
+      toast.success(failCount > 0 ? `Generated ${successCount} emails (${failCount} used fallback)` : `Generated ${emails.length} emails!`);
     } catch (error: any) { 
       toast.error(error.message || "Failed to generate emails"); 
-    }
-    finally { setIsGenerating(false); }
+    } finally { setIsGenerating(false); }
   };
 
   const sendBulkEmails = async () => {
@@ -493,40 +518,89 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
                 )}
               </div>
               {selectedLead && (
-                <div className="mt-2 flex items-center gap-2 flex-wrap">
-                  {selectedLead.niche && <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-50 text-blue-600 border border-blue-100">{selectedLead.niche}</span>}
-                  {selectedLead.location && <span className="text-[10px] text-gray-400">📍 {selectedLead.location}</span>}
-                  <button
-                    onClick={() => enrichLead(selectedLead)}
-                    disabled={isEnriching}
-                    className="ml-auto flex items-center gap-1 text-[10px] px-2 py-1 rounded-lg bg-gray-100 text-gray-600 hover:bg-gray-200 transition-colors disabled:opacity-50"
-                  >
-                    {isEnriching ? <Loader2 size={10} className="animate-spin" /> : <Zap size={10} />}
-                    {enriched ? "Enriched ✓" : "Enrich lead"}
-                  </button>
+                <div className="mt-2 flex flex-col gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {selectedLead.niche && <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-50 text-blue-600 border border-blue-100">{selectedLead.niche}</span>}
+                    {selectedLead.location && <span className="text-[10px] text-gray-400">📍 {selectedLead.location}</span>}
+                    <button
+                      onClick={() => enrichLead(selectedLead)}
+                      disabled={isEnriching}
+                      className="ml-auto flex items-center gap-1 text-[10px] px-2 py-1 rounded-lg bg-gray-100 text-gray-600 hover:bg-gray-200 transition-colors disabled:opacity-50"
+                    >
+                      {isEnriching ? <Loader2 size={10} className="animate-spin" /> : <Zap size={10} />}
+                      {enriched ? "Enriched ✓" : "Enrich lead"}
+                    </button>
+                  </div>
+                  
+                  {/* Warning for generated emails */}
+                  {selectedLead.email && !enriched && (
+                    selectedLead.email.startsWith('info@') || 
+                    selectedLead.email.startsWith('contact@') || 
+                    selectedLead.email.startsWith('hello@')
+                  ) && (
+                    <div className="flex items-start gap-2 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
+                      <span className="text-yellow-600 text-sm">⚠️</span>
+                      <div className="flex-1">
+                        <p className="text-xs font-medium text-yellow-800">Generated Email - May Bounce</p>
+                        <p className="text-xs text-yellow-700 mt-0.5">
+                          {selectedLead.email} appears auto-generated. Try enriching the lead first or use a custom email.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                  
+                  {/* Info after enrichment if email is still generated */}
+                  {selectedLead.email && enriched && (
+                    selectedLead.email.startsWith('info@') || 
+                    selectedLead.email.startsWith('contact@') || 
+                    selectedLead.email.startsWith('hello@')
+                  ) && (
+                    <div className="flex items-start gap-2 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                      <span className="text-blue-600 text-sm">ℹ️</span>
+                      <div className="flex-1">
+                        <p className="text-xs font-medium text-blue-800">No Real Email Found</p>
+                        <p className="text-xs text-blue-700 mt-0.5">
+                          Enrichment couldn't find a real email on their website. You can try using a custom email or search for their contact info manually.
+                        </p>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
 
-            {/* Sender info */}
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-widest mb-2 text-gray-500">Your Company</label>
-                <input
-                  value={yourCompany}
-                  onChange={(e) => setYourCompany(e.target.value)}
-                  placeholder="e.g. Acme Inc"
-                  className="w-full px-4 py-3 rounded-xl text-sm border border-gray-300 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 bg-white outline-none transition-all"
-                />
+            {/* Sender profile — fill once, auto-saved */}
+            <div className="rounded-xl border border-gray-200 overflow-hidden">
+              <div className="flex items-center justify-between px-4 py-3 bg-gray-50 border-b border-gray-100">
+                <span className="text-xs font-semibold uppercase tracking-widest text-gray-500">Your Profile</span>
+                {yourCompany && yourService
+                  ? <span className="text-[10px] text-green-600 font-medium flex items-center gap-1">
+                      {profileSaved ? "✓ Saved" : `${yourCompany} · ${yourService}`}
+                    </span>
+                  : <span className="text-[10px] text-orange-500">Fill once — used for all emails</span>
+                }
               </div>
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-widest mb-2 text-gray-500">Your Service / Product</label>
-                <input
-                  value={yourService}
-                  onChange={(e) => setYourService(e.target.value)}
-                  placeholder="e.g. AI-powered CRM"
-                  className="w-full px-4 py-3 rounded-xl text-sm border border-gray-300 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 bg-white outline-none transition-all"
-                />
+              <div className="grid grid-cols-2 gap-3 p-4">
+                <div>
+                  <label className="block text-[10px] font-semibold uppercase tracking-widest mb-1.5 text-gray-400">Your Company</label>
+                  <input
+                    value={yourCompany}
+                    onChange={(e) => setYourCompany(e.target.value)}
+                    onBlur={() => yourCompany && yourService && saveSenderProfile(yourCompany, yourService)}
+                    placeholder="e.g. Acme Inc"
+                    className="w-full px-3 py-2.5 rounded-lg text-sm border border-gray-300 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 bg-white outline-none transition-all"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-semibold uppercase tracking-widest mb-1.5 text-gray-400">Your Service / Product</label>
+                  <input
+                    value={yourService}
+                    onChange={(e) => setYourService(e.target.value)}
+                    onBlur={() => yourCompany && yourService && saveSenderProfile(yourCompany, yourService)}
+                    placeholder="e.g. AI-powered CRM"
+                    className="w-full px-3 py-2.5 rounded-lg text-sm border border-gray-300 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 bg-white outline-none transition-all"
+                  />
+                </div>
               </div>
             </div>
 
@@ -670,17 +744,30 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
           <div className="p-6 flex flex-col gap-5">
             {bulkEmails.length === 0 ? (
               <>
-                {/* Sender info */}
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs font-semibold uppercase tracking-widest mb-2 text-gray-500">Your Company</label>
-                    <input value={bulkYourCompany} onChange={(e) => setBulkYourCompany(e.target.value)} placeholder="e.g. Acme Inc"
-                      className="w-full px-4 py-3 rounded-xl text-sm text-gray-900 border border-gray-300 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 bg-white outline-none transition-all placeholder:text-gray-400" />
+                {/* Sender profile (shared with single mode) */}
+                <div className="rounded-xl border border-gray-200 overflow-hidden">
+                  <div className="flex items-center justify-between px-4 py-3 bg-gray-50 border-b border-gray-100">
+                    <span className="text-xs font-semibold uppercase tracking-widest text-gray-500">Your Profile</span>
+                    {yourCompany && yourService
+                      ? <span className="text-[10px] text-green-600 font-medium">{yourCompany} · {yourService}</span>
+                      : <span className="text-[10px] text-orange-500">Fill once — used for all emails</span>
+                    }
                   </div>
-                  <div>
-                    <label className="block text-xs font-semibold uppercase tracking-widest mb-2 text-gray-500">Your Service / Product</label>
-                    <input value={bulkYourService} onChange={(e) => setBulkYourService(e.target.value)} placeholder="e.g. AI-powered CRM"
-                      className="w-full px-4 py-3 rounded-xl text-sm text-gray-900 border border-gray-300 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 bg-white outline-none transition-all placeholder:text-gray-400" />
+                  <div className="grid grid-cols-2 gap-3 p-4">
+                    <div>
+                      <label className="block text-[10px] font-semibold uppercase tracking-widest mb-1.5 text-gray-400">Your Company</label>
+                      <input value={yourCompany} onChange={(e) => setYourCompany(e.target.value)}
+                        onBlur={() => yourCompany && yourService && saveSenderProfile(yourCompany, yourService)}
+                        placeholder="e.g. Acme Inc"
+                        className="w-full px-3 py-2.5 rounded-lg text-sm text-gray-900 border border-gray-300 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 bg-white outline-none transition-all placeholder:text-gray-400" />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold uppercase tracking-widest mb-1.5 text-gray-400">Your Service / Product</label>
+                      <input value={yourService} onChange={(e) => setYourService(e.target.value)}
+                        onBlur={() => yourCompany && yourService && saveSenderProfile(yourCompany, yourService)}
+                        placeholder="e.g. AI-powered CRM"
+                        className="w-full px-3 py-2.5 rounded-lg text-sm text-gray-900 border border-gray-300 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 bg-white outline-none transition-all placeholder:text-gray-400" />
+                    </div>
                   </div>
                 </div>
 

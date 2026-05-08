@@ -23,9 +23,18 @@ export async function generateAIEmail(params: EmailGenerationParams): Promise<{ 
   const response = await fetch(`/api/ai-provider?userId=${userId}`);
   
   if (!response.ok) {
-    const error = await response.json();
-    console.error("AI provider fetch error:", error);
-    throw new Error(error.error || "No active AI provider configured. Please set up AI in Settings.");
+    let errorMessage = "No active AI provider configured. Please set up AI in Settings.";
+    try {
+      const error = await response.json();
+      console.error("AI provider fetch error:", error);
+      errorMessage = error.error || error.details || errorMessage;
+      console.error("Full error details:", JSON.stringify(error, null, 2));
+    } catch (parseError) {
+      console.error("Could not parse error response:", parseError);
+      const text = await response.text();
+      console.error("Raw error response:", text);
+    }
+    throw new Error(errorMessage);
   }
   
   const aiProvider = await response.json();
@@ -241,17 +250,51 @@ BODY: [email body — direct, short, problem-focused]`;
       throw new Error(`Unsupported AI provider: ${aiProvider.provider}`);
     }
     
-    // Parse the response
+    console.log('Raw AI response:', aiResponse);
+    
+    // Parse the response - try multiple formats
+    let subject = '';
+    let body = '';
+    
+    // Try format 1: SUBJECT: ... BODY: ...
     const subjectMatch = aiResponse.match(/SUBJECT:\s*(.+?)(?:\n|$)/i);
     const bodyMatch = aiResponse.match(/BODY:\s*([\s\S]+?)$/i);
     
-    if (!subjectMatch || !bodyMatch) {
-      throw new Error("AI response format invalid");
+    if (subjectMatch && bodyMatch) {
+      subject = subjectMatch[1].trim();
+      body = bodyMatch[1].trim();
+    } else {
+      // Try format 2: First line is subject, rest is body
+      const lines = aiResponse.trim().split('\n');
+      if (lines.length >= 2) {
+        subject = lines[0].replace(/^(SUBJECT:|Subject:)/i, '').trim();
+        body = lines.slice(1).join('\n').replace(/^(BODY:|Body:)/i, '').trim();
+      } else {
+        // Last resort: log the response and throw error
+        console.error('AI response does not match expected format');
+        console.error('Expected format: SUBJECT: ... \\n BODY: ...');
+        console.error('Actual response:', aiResponse);
+        throw new Error("AI response format invalid. Expected 'SUBJECT: ...' and 'BODY: ...' format.");
+      }
     }
     
+    // Clean up the subject and body
+    subject = subject.replace(/^["']|["']$/g, '').trim();
+    body = body.replace(/^["']|["']$/g, '').trim();
+    
+    if (!subject || !body) {
+      console.error('Parsed subject or body is empty');
+      console.error('Subject:', subject);
+      console.error('Body:', body);
+      throw new Error("AI generated empty subject or body");
+    }
+    
+    console.log('Parsed email - Subject:', subject);
+    console.log('Parsed email - Body length:', body.length);
+    
     return {
-      subject: subjectMatch[1].trim(),
-      body: bodyMatch[1].trim()
+      subject,
+      body
     };
     
   } catch (error) {

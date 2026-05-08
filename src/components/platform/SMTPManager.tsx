@@ -84,7 +84,14 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
     setLoading(true);
 
     try {
-      // Create new account object
+      // Validate email format
+      if (!formData.email.includes('@')) {
+        toast.error("Invalid email address");
+        setLoading(false);
+        return;
+      }
+
+      // Create new account object matching the database schema
       const newAccount = {
         user_id: userId,
         email: formData.email,
@@ -96,26 +103,36 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
         daily_limit: formData.daily_limit,
         sent_today: 0,
         status: 'active',
-        last_reset: new Date().toISOString()
+        last_reset: new Date().toISOString(),
       };
 
+      console.log('Inserting SMTP account:', { ...newAccount, password: '***' });
+
       // Insert into Supabase
-      const { error } = await supabase
+      const { data, error } = await supabase
         .from('smtp_accounts')
-        .insert(newAccount);
+        .insert(newAccount)
+        .select();
 
       if (error) {
+        console.error('Supabase error:', error);
+        console.error('Error details:', JSON.stringify(error, null, 2));
+        console.error('Error code:', error.code);
+        console.error('Error message:', error.message);
+        console.error('Error hint:', error.hint);
+        console.error('Error details:', error.details);
+        
         if (error.code === '23505') { // Unique constraint violation
           toast.error("This email address is already added");
         } else {
-          console.error('Error adding SMTP account:', error);
-          toast.error("Failed to add SMTP account: " + error.message);
+          toast.error("Failed to add SMTP account: " + (error.message || 'Unknown error. Check console for details.'));
         }
         setLoading(false);
         return;
       }
 
-      toast.success("Gmail SMTP account added successfully");
+      console.log('SMTP account added successfully:', data);
+
       setShowAddForm(false);
       setFormData({
         provider: "Gmail",
@@ -126,7 +143,22 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
         password: "",
         daily_limit: GMAIL_SMTP.limit,
       });
+
       await loadAccounts();
+
+      // Verify the account is visible server-side (same path the email sender uses)
+      try {
+        const checkRes = await fetch("/api/smtp-check");
+        const checkData = await checkRes.json();
+        if (checkData.success && checkData.count > 0) {
+          toast.success(`Gmail account added ✓ — server can see ${checkData.count} account(s), ready to send`);
+        } else {
+          toast.warning("Account saved, but the server can't see it yet. Try refreshing the page. If the problem persists, check your Supabase RLS policies.");
+        }
+      } catch {
+        // Non-critical — just show the basic success
+        toast.success("Gmail SMTP account added successfully!");
+      }
     } catch (error) {
       console.error('Exception adding SMTP account:', error);
       toast.error("An error occurred: " + (error instanceof Error ? error.message : 'Unknown error'));
