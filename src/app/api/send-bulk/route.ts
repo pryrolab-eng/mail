@@ -236,12 +236,12 @@ export async function POST(request: NextRequest) {
             status: "sent",
           });
 
-          // Update lead status to "Email Sent" if still "New"
+          // Update lead status to "contacted" if still "new"
           await serviceSupabase
             .from("leads")
-            .update({ status: "Email Sent", updated_at: new Date().toISOString() })
+            .update({ status: "contacted", updated_at: new Date().toISOString(), last_contacted_at: new Date().toISOString() })
             .eq("id", email.leadId)
-            .eq("status", "New"); // Only update if still New
+            .in("status", ["new", "New"]); // Only update if still new
         } else {
           results.failed++;
           results.errors.push(`${email.to}: ${sendResult.error}`);

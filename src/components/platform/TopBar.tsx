@@ -1,26 +1,31 @@
 "use client";
 
 import { ActiveModule } from "@/types/platform";
-import { Radio, Mail, Settings, Layout, LogOut, Server, Clock, Menu } from "lucide-react";
+import { Radio, Mail, Settings, Layout, LogOut, Server, Clock, Menu, BarChart2, FileText, Megaphone } from "lucide-react";
+import { NotificationsBell } from "./NotificationsPanel";
 
 interface TopBarProps {
   activeModule: ActiveModule;
   userEmail?: string;
+  userId?: string;
   onLogout?: () => void;
   onMenuToggle?: () => void;
 }
 
 const moduleInfo: Record<ActiveModule, { label: string; desc: string; icon: React.ElementType }> = {
-  scraper: { label: "Email Scraper", desc: "Find and scrape leads by niche & location", icon: Radio },
-  "email-writer": { label: "AI Email Writer", desc: "Generate personalized cold outreach emails", icon: Mail },
-  crm: { label: "CRM Pipeline", desc: "Manage and track your outreach pipeline", icon: Layout },
-  "smtp-manager": { label: "SMTP Manager", desc: "Manage your email sending accounts (60 Gmail accounts)", icon: Server },
-  "ai-settings": { label: "AI Settings", desc: "Configure AI providers and active model", icon: Settings },
-  "follow-up": { label: "Follow-Up System", desc: "Manage automated email follow-up sequences", icon: Clock },
+  scraper:       { label: "Email Scraper",    desc: "Find and scrape leads by niche & location",          icon: Radio },
+  "email-writer":{ label: "AI Email Writer",  desc: "Generate personalized cold outreach emails",         icon: Mail },
+  crm:           { label: "CRM Pipeline",     desc: "Manage and track your outreach pipeline",            icon: Layout },
+  "smtp-manager":{ label: "SMTP Manager",     desc: "Manage your email sending accounts",                 icon: Server },
+  "ai-settings": { label: "AI Settings",      desc: "Configure AI providers and active model",            icon: Settings },
+  "follow-up":   { label: "Follow-Up System", desc: "Manage automated email follow-up sequences",         icon: Clock },
+  analytics:     { label: "Analytics",        desc: "Real-time campaign performance and insights",        icon: BarChart2 },
+  campaigns:     { label: "Campaigns",        desc: "Create and manage email campaigns",                  icon: Megaphone },
+  templates:     { label: "Templates",        desc: "Manage reusable email templates",                    icon: FileText },
 };
 
-export default function TopBar({ activeModule, userEmail, onLogout, onMenuToggle }: TopBarProps) {
-  const info = moduleInfo[activeModule];
+export default function TopBar({ activeModule, userEmail, userId, onLogout, onMenuToggle }: TopBarProps) {
+  const info = moduleInfo[activeModule] || moduleInfo.scraper;
   const Icon = info.icon;
 
   return (
@@ -51,16 +56,19 @@ export default function TopBar({ activeModule, userEmail, onLogout, onMenuToggle
         </div>
       </div>
 
-      <div className="flex items-center gap-2 sm:gap-4">
-        {/* Status indicator */}
-        <div className="hidden sm:flex items-center gap-1.5">
-          <div className="w-2 h-2 rounded-full bg-green-500" />
-          <span className="text-xs text-gray-500">SUPABASE</span>
+      <div className="flex items-center gap-2 sm:gap-3">
+        {/* Live indicator */}
+        <div className="hidden sm:flex items-center gap-1.5 px-2 py-1 rounded-full bg-green-50 border border-green-200">
+          <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+          <span className="text-[10px] font-medium text-green-700">LIVE</span>
         </div>
+
+        {/* Notifications */}
+        {userId && <NotificationsBell userId={userId} />}
 
         {/* User email */}
         {userEmail && (
-          <span className="hidden md:block text-sm text-gray-600 truncate max-w-[180px]">
+          <span className="hidden md:block text-xs text-gray-500 truncate max-w-[160px] px-2 py-1 rounded-lg bg-gray-50 border border-gray-200">
             {userEmail}
           </span>
         )}
@@ -68,7 +76,7 @@ export default function TopBar({ activeModule, userEmail, onLogout, onMenuToggle
         {/* Sign out */}
         <button
           onClick={onLogout}
-          className="flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 rounded-lg text-sm font-medium text-red-600 bg-red-50 hover:bg-red-100 transition-colors border border-red-100"
+          className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium text-red-600 bg-red-50 hover:bg-red-100 transition-colors border border-red-100"
         >
           <LogOut size={14} />
           <span className="hidden sm:inline">Sign Out</span>

@@ -154,7 +154,7 @@ async function scrapeWebsiteForEmail(companyName: string, website?: string): Pro
           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
           'Accept-Language': 'en-US,en;q=0.9',
         },
-        signal: AbortSignal.timeout(8000),
+        signal: AbortSignal.timeout(6000), // Reduced from 8000ms
       });
 
       if (response.ok) {
@@ -259,10 +259,10 @@ export async function findRealEmail(
   } = {}
 ): Promise<EmailFinderResult> {
   const {
-    useGoogle = true,
+    useGoogle = false, // Disabled by default - too slow and unreliable
     useWebsite = true,
-    useLinkedIn = true,
-    timeout = 30000,
+    useLinkedIn = false, // Disabled by default - requires auth
+    timeout = 15000, // Reduced from 30000ms
   } = options;
   
   console.log(`\n[Email Finder] Starting search for: ${companyName}`);

@@ -2,9 +2,26 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "../../../../supabase/server";
 import { createServiceClient } from "../../../../supabase/service";
 import { SMTPManager } from "@/utils/smtp-server";
+import { randomUUID } from "crypto";
+import { classifyBounce } from "@/types/platform";
 
 // nodemailer requires the Node.js runtime (not Edge)
 export const runtime = "nodejs";
+
+/** Inject tracking pixel and wrap links for click tracking */
+function injectTracking(html: string, pixelId: string, baseUrl: string): string {
+  // Add tracking pixel before </body>
+  const pixel = `<img src="${baseUrl}/api/track/open?id=${pixelId}" width="1" height="1" style="display:none" alt="" />`;
+  const tracked = html.includes('</body>')
+    ? html.replace('</body>', `${pixel}</body>`)
+    : html + pixel;
+
+  // Wrap links for click tracking
+  return tracked.replace(
+    /href="(https?:\/\/[^"]+)"/gi,
+    (_, url) => `href="${baseUrl}/api/track/click?id=${pixelId}&url=${encodeURIComponent(url)}"`
+  );
+}
 
 export interface SendEmailRequest {
   leadId?: string;  // Optional — not required for manual sends
@@ -138,6 +155,38 @@ export async function POST(request: NextRequest) {
     const result = await smtpManager.sendEmail(to, subject, emailBody);
 
     if (!result.success) {
+      // Classify the bounce/failure type
+      const bounceType = classifyBounce(result.error || '');
+
+      // Log failed email
+      const serviceSupabase2 = createServiceClient();
+      await serviceSupabase2.from('sent_emails').insert({
+        user_id: user.id,
+        lead_id: lead?.id ?? null,
+        to_email: to,
+        subject,
+        body: emailBody,
+        sent_at: new Date().toISOString(),
+        status: 'failed',
+        bounce_reason: result.error,
+      }).catch(() => {});
+
+      // Update lead status to 'failed'
+      if (lead?.id) {
+        await serviceSupabase2.from('leads')
+          .update({ status: 'failed', updated_at: new Date().toISOString() })
+          .eq('id', lead.id).catch(() => {});
+      }
+
+      // Create notification
+      await serviceSupabase2.from('notifications').insert({
+        user_id: user.id,
+        type: 'failed_email',
+        title: 'Email Failed to Send',
+        message: `Failed to send to ${to}: ${result.error}`,
+        data: { to, error: result.error, bounceType },
+      }).catch(() => {});
+
       return NextResponse.json(
         { success: false, error: result.error || "Failed to send email" },
         { status: 500 }
@@ -156,18 +205,24 @@ export async function POST(request: NextRequest) {
       smtpAccountId = smtpAccount?.id ?? null;
     }
 
-    // Record the sent email
+    // Record the sent email with tracking
+    const trackingPixelId = randomUUID();
+    const baseUrl = request.headers.get('origin') || process.env.NEXT_PUBLIC_APP_URL || '';
+    const trackedBody = injectTracking(emailBody, trackingPixelId, baseUrl);
+
     const insertData: any = {
       user_id: user.id,
       lead_id: lead?.id ?? null,   // only set if lead was found in DB
       to_email: to,
       subject,
-      body: emailBody,
+      body: trackedBody,
       sent_at: new Date().toISOString(),
       status: "sent",
+      tracking_pixel_id: trackingPixelId,
+      smtp_account_id: smtpAccountId,
     };
     
-    // Only add campaign_id if provided (column might not exist in all schemas)
+    // Only add campaign_id if provided
     if (campaignId) {
       insertData.campaign_id = campaignId;
     }
@@ -203,8 +258,7 @@ export async function POST(request: NextRequest) {
       accountUsed: result.accountUsed
     });
 
-    // Update lead status to "Email Sent" — always, regardless of current status
-    // This guarantees the lead moves to the Email Sent column every time an email is sent
+    // Update lead status to "contacted" — always, regardless of current status
     const leadToUpdate = lead ?? await (async () => {
       const { data } = await serviceSupabase
         .from("leads")
@@ -219,15 +273,15 @@ export async function POST(request: NextRequest) {
       const prevStatus = leadToUpdate.status;
       await serviceSupabase
         .from("leads")
-        .update({ status: "Email Sent", updated_at: new Date().toISOString() })
+        .update({ status: "contacted", updated_at: new Date().toISOString(), last_contacted_at: new Date().toISOString() })
         .eq("id", leadToUpdate.id);
 
       // Log status history only if status actually changed
-      if (prevStatus !== "Email Sent") {
+      if (prevStatus !== "contacted") {
         await serviceSupabase.from("lead_status_history").insert({
           lead_id: leadToUpdate.id,
           old_status: prevStatus,
-          new_status: "Email Sent",
+          new_status: "contacted",
         }).catch(() => {}); // non-critical
       }
     }

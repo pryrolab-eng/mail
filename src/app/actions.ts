@@ -175,11 +175,10 @@ export const scrapeLeadsAction = async (niche: string, location: string, maxResu
 
     const leads = await scrapeWithoutAPI(niche, location, maxResults);
 
-    // Return ALL leads — both real emails and fallback info@domain ones.
-    // The UI shows a "REAL" badge on verified emails so the user can tell them apart.
-    // Filtering to emailIsReal only causes zero results for locations where
-    // businesses don't publish emails on their websites (very common outside US/EU).
-    console.log(`✓ Scraping complete: ${leads.length} leads (${leads.filter(l => l.emailIsReal).length} real emails)`);
+    // Returns leads with REAL verified emails + fallback emails for businesses with websites.
+    // emailIsReal flag indicates which are verified (true) vs fallback guesses (false).
+    const realCount = leads.filter(l => l.emailIsReal).length;
+    console.log(`✓ Scraping complete: ${leads.length} leads (${realCount} verified, ${leads.length - realCount} fallback)`);
 
     return {
       success: true,

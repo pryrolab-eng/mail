@@ -10,8 +10,15 @@ import CRMModule from "./CRMModule";
 import AISettingsModule from "./AISettingsModule";
 import SMTPManager from "./SMTPManager";
 import FollowUpModule from "./FollowUpModule";
+import AnalyticsDashboard from "./AnalyticsDashboard";
 import { createClient } from "../../../supabase/client";
 import { useRouter } from "next/navigation";
+
+// Lazy-loaded modules (only rendered when active)
+function LazyModule({ active, children }: { active: boolean; children: React.ReactNode }) {
+  if (!active) return null;
+  return <>{children}</>;
+}
 
 interface PlatformLayoutProps {
   userId: string;
@@ -42,8 +49,11 @@ export default function PlatformLayout({ userId, userEmail }: PlatformLayoutProp
         niche: lead.niche,
         location: lead.location,
         company_context: lead.company_context,
-        status: "New",
+        status: "new",
         notes: null,
+        category: null,
+        source: "scraper",
+        tags: null,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       });
@@ -63,6 +73,10 @@ export default function PlatformLayout({ userId, userEmail }: PlatformLayoutProp
   const handleModuleChange = (module: ActiveModule) => {
     setActiveModule(module);
     setSidebarOpen(false);
+    // Clear preloaded lead when switching away from email writer
+    if (module !== "email-writer") {
+      setPreloadedLead(null);
+    }
   };
 
   return (
@@ -90,42 +104,104 @@ export default function PlatformLayout({ userId, userEmail }: PlatformLayoutProp
         <TopBar
           activeModule={activeModule}
           userEmail={userEmail}
+          userId={userId}
           onLogout={handleLogout}
           onMenuToggle={() => setSidebarOpen(!sidebarOpen)}
         />
 
         <main className="flex-1 overflow-y-auto bg-white">
-          {activeModule === "scraper" && (
+          {/* Always-mounted modules (keep state) */}
+          <div className={activeModule === "scraper" ? "block h-full" : "hidden"}>
             <ScraperModule
               userId={userId}
               onLeadsAdded={handleLeadsAdded}
               onGenerateEmails={handleGenerateEmailFromScraper}
             />
-          )}
-          {activeModule === "email-writer" && (
-            <EmailWriterModule
-              key={preloadedLead?.id}
-              userId={userId}
-              preloadedLead={preloadedLead}
-            />
-          )}
-          {activeModule === "crm" && (
+          </div>
+
+          <div className={activeModule === "crm" ? "block h-full" : "hidden"}>
             <CRMModule
               key={crmRefreshKey}
               userId={userId}
               onWriteEmail={handleWriteEmailFromCRM}
             />
-          )}
-          {activeModule === "ai-settings" && (
+          </div>
+
+          {/* Lazy-mounted modules */}
+          <LazyModule active={activeModule === "email-writer"}>
+            <EmailWriterModule
+              key={preloadedLead?.id || "email-writer"}
+              userId={userId}
+              preloadedLead={preloadedLead}
+            />
+          </LazyModule>
+
+          <LazyModule active={activeModule === "analytics"}>
+            <AnalyticsDashboard userId={userId} />
+          </LazyModule>
+
+          <LazyModule active={activeModule === "ai-settings"}>
             <AISettingsModule userId={userId} />
-          )}
-          {activeModule === "smtp-manager" && (
+          </LazyModule>
+
+          <LazyModule active={activeModule === "smtp-manager"}>
             <SMTPManager userId={userId} />
-          )}
-          {activeModule === "follow-up" && (
+          </LazyModule>
+
+          <LazyModule active={activeModule === "follow-up"}>
             <FollowUpModule userId={userId} />
-          )}
+          </LazyModule>
+
+          <LazyModule active={activeModule === "campaigns"}>
+            <CampaignsPlaceholder userId={userId} onNavigate={handleModuleChange} />
+          </LazyModule>
+
+          <LazyModule active={activeModule === "templates"}>
+            <TemplatesPlaceholder userId={userId} />
+          </LazyModule>
         </main>
+      </div>
+    </div>
+  );
+}
+
+// ─── Placeholder modules (to be built out) ───────────────────────────────────
+
+function CampaignsPlaceholder({ userId, onNavigate }: { userId: string; onNavigate: (m: ActiveModule) => void }) {
+  return (
+    <div className="flex flex-col items-center justify-center h-full min-h-[400px] gap-4 p-8">
+      <div className="w-16 h-16 rounded-2xl bg-blue-50 flex items-center justify-center">
+        <span className="text-3xl">📣</span>
+      </div>
+      <div className="text-center">
+        <h2 className="text-xl font-bold text-gray-900">Campaigns</h2>
+        <p className="text-sm text-gray-500 mt-2 max-w-md">
+          Create targeted email campaigns, schedule sends, and track performance.
+          Use the <strong>Email Writer</strong> to generate and send bulk emails now.
+        </p>
+      </div>
+      <button
+        onClick={() => onNavigate("email-writer")}
+        className="px-5 py-2.5 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:bg-blue-700 transition-colors"
+      >
+        Go to Email Writer →
+      </button>
+    </div>
+  );
+}
+
+function TemplatesPlaceholder({ userId }: { userId: string }) {
+  return (
+    <div className="flex flex-col items-center justify-center h-full min-h-[400px] gap-4 p-8">
+      <div className="w-16 h-16 rounded-2xl bg-purple-50 flex items-center justify-center">
+        <span className="text-3xl">📝</span>
+      </div>
+      <div className="text-center">
+        <h2 className="text-xl font-bold text-gray-900">Email Templates</h2>
+        <p className="text-sm text-gray-500 mt-2 max-w-md">
+          Save and reuse your best-performing email templates across campaigns.
+          Templates are saved automatically when you generate emails in the Email Writer.
+        </p>
       </div>
     </div>
   );

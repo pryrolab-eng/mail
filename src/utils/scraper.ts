@@ -135,17 +135,17 @@ export async function scrapeWithGooglePlaces(
 
         try {
           const found = await findRealEmail(result.name, result.website, {
-            useGoogle: true,
+            useGoogle: false,  // Disabled - too slow
             useWebsite: true,
-            useLinkedIn: true,
-            timeout: 15_000,
+            useLinkedIn: false, // Disabled - requires auth
+            timeout: 12_000,    // Reduced from 15_000
           });
 
           if (found.email) {
             email = found.email;
             console.log(`✅ Real email: ${email} (${found.confidence}) via ${found.source}`);
           } else {
-            console.log(`❌ No real email found for ${result.name}`);
+            console.log(`No real email found for ${result.name}`);
           }
         } catch (e) {
           console.error('[Places] Email lookup failed:', e);
@@ -157,7 +157,7 @@ export async function scrapeWithGooglePlaces(
             ? new URL(result.website).hostname.replace('www.', '')
             : `${result.name.toLowerCase().replace(/[^a-z0-9]/g, '')}.com`;
           email = `info@${domain}`;
-          console.log(`⚠️  Fallback email: ${email}`);
+          console.log(`  Fallback email: ${email}`);
         }
 
         leads.push({

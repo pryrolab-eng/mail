@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { Lead, LeadStatus } from "@/types/platform";
+import { Lead, LeadStatus, LEAD_STATUSES } from "@/types/platform";
 import {
   Filter,
   Mail,
@@ -26,32 +26,16 @@ interface CRMModuleProps {
   onWriteEmail?: (lead: Lead) => void;
 }
 
-const STATUSES: { value: LeadStatus; color: string; dot: string }[] = [
-  { value: "New", color: "#2563EB", dot: "status-dot-blue" },
-  { value: "Email Sent", color: "#F59E0B", dot: "status-dot-amber" },
-  { value: "Replied", color: "#8B5CF6", dot: "status-dot-purple" },
-  { value: "Interested", color: "#10B981", dot: "status-dot-green" },
-  { value: "Closed", color: "#059669", dot: "status-dot-emerald" },
-  { value: "Dead", color: "#EF4444", dot: "status-dot-red" },
-];
+// Use the unified LEAD_STATUSES from types
+const STATUSES = LEAD_STATUSES;
 
-const STATUS_COLORS: Record<LeadStatus, string> = {
-  New: "#2563EB",
-  "Email Sent": "#F59E0B",
-  Replied: "#8B5CF6",
-  Interested: "#10B981",
-  Closed: "#059669",
-  Dead: "#EF4444",
-};
+const STATUS_COLORS: Record<string, string> = Object.fromEntries(
+  LEAD_STATUSES.map(s => [s.value, s.color])
+);
 
-const STATUS_BG: Record<LeadStatus, string> = {
-  New: "#EFF6FF",
-  "Email Sent": "#FEF3C7",
-  Replied: "#F3E8FF",
-  Interested: "#D1FAE5",
-  Closed: "#D1FAE5",
-  Dead: "#FEE2E2",
-};
+const STATUS_BG: Record<string, string> = Object.fromEntries(
+  LEAD_STATUSES.map(s => [s.value, s.bg])
+);
 
 interface LeadWithEmails extends Lead {
   generated_emails?: Array<{ id: string; subject: string; body: string; model_used: string; created_at: string; tone: string }>;
@@ -208,9 +192,9 @@ export default function CRMModule({ userId, onWriteEmail }: CRMModuleProps) {
 
   const stats = {
     total: leads.length,
-    emailSent: leads.filter((l) => l.status === "Email Sent").length,
-    interested: leads.filter((l) => l.status === "Interested").length,
-    closed: leads.filter((l) => l.status === "Closed").length,
+    contacted: leads.filter((l) => l.status === "contacted" || l.status === "Email Sent").length,
+    replied: leads.filter((l) => l.status === "replied" || l.status === "Replied").length,
+    interested: leads.filter((l) => l.status === "interested" || l.status === "Interested").length,
   };
 
   if (loading) {
@@ -228,9 +212,9 @@ export default function CRMModule({ userId, onWriteEmail }: CRMModuleProps) {
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3">
           {[
             { label: "Total Leads", value: stats.total, icon: Users, color: "#2563EB" },
-            { label: "Emails Sent", value: stats.emailSent, icon: Send, color: "#F59E0B" },
+            { label: "Contacted", value: stats.contacted, icon: Send, color: "#F59E0B" },
+            { label: "Replied", value: stats.replied, icon: MessageSquare, color: "#8B5CF6" },
             { label: "Interested", value: stats.interested, icon: TrendingUp, color: "#10B981" },
-            { label: "Closed", value: stats.closed, icon: MessageSquare, color: "#8B5CF6" },
           ].map((stat) => {
             const Icon = stat.icon;
             return (

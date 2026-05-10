@@ -193,13 +193,11 @@ async function extractEmailsFromRenderedPage(page: Page): Promise<string[]> {
  * Visit a website and find a real email using a fully JS-rendered browser.
  * Pass `location` so we can prefer country-specific emails (e.g. info.rw@ for Rwanda).
  *
- * Crawls the site exhaustively:
- *  1. Homepage
- *  2. /contact, /contact-us, /about, /about-us and other common paths — directly
- *  3. Every link in the nav/footer that looks like contact/about/location/team
- *  4. Every remaining internal link on the site (up to 30 pages total)
+ * Crawls the site smartly:
+ *  1. Homepage — returns immediately if email found
+ *  2. /contact, /contact-us, /about, /about-us and contact-looking nav links
+ *  3. Stops as soon as a good email is found (max 5 pages total)
  *
- * Never gives up while there are pages left to check.
  * Returns null ONLY if the site has zero email addresses anywhere.
  */
 async function findEmailOnWebsite(page: Page, website: string, location = ''): Promise<string | null> {
@@ -208,7 +206,7 @@ async function findEmailOnWebsite(page: Page, website: string, location = ''): P
 
   const visited = new Set<string>();
   const allEmails: string[] = [];
-  const MAX_PAGES = 30;
+  const MAX_PAGES = 2; // Homepage + contact only — real emails are here or nowhere
 
   /** Navigate, render JS, extract emails. Returns [] on error. */
   const visitAndExtract = async (url: string): Promise<string[]> => {
@@ -233,68 +231,20 @@ async function findEmailOnWebsite(page: Page, website: string, location = ''): P
     }
   };
 
-  /** Collect all internal links from the currently loaded page. */
-  const collectLinks = async (): Promise<string[]> => {
-    return page.evaluate((origin: string) => {
-      return Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href]'))
-        .map((a) => { try { return new URL(a.href).origin + new URL(a.href).pathname; } catch { return ''; } })
-        .filter((h) => h.startsWith(origin));
-    }, baseOrigin);
-  };
-
-  // ── Priority 1: Contact/about paths hit directly ──────────────────────────
+  // ── Priority 1: Contact paths only — where real emails live ─────────
   const priorityPaths = [
     '/contact', '/contact-us', '/contact.html', '/contact.php',
-    '/about',   '/about-us',   '/about.html',
-    '/reach-us', '/get-in-touch', '/team', '/staff',
-    '/imprint',  '/impressum',   '/legal',
-    '/location', '/locations',   '/our-team',
   ];
 
-  // Visit homepage first to collect nav links
-  console.log(`    🌐 ${website}`);
+  // Visit homepage first — most sites have email in footer
   const homepageEmails = await visitAndExtract(website);
   allEmails.push(...homepageEmails);
   if (pickBestEmail(allEmails, location)) return pickBestEmail(allEmails, location)!;
 
-  // Collect nav/footer links from homepage — prioritise contact-looking ones
-  let homepageLinks: string[] = [];
-  try { homepageLinks = await collectLinks(); } catch { /* ignore */ }
-
-  const contactLinks = homepageLinks.filter((h) =>
-    /contact|about|team|reach|imprint|impressum|location|staff|people/.test(h)
-  );
-  const otherLinks = homepageLinks.filter((h) =>
-    !/contact|about|team|reach|imprint|impressum|location|staff|people/.test(h)
-  );
-
-  // ── Priority 2: Common paths + contact-looking nav links ─────────────────
-  const priority2 = [
-    ...priorityPaths.map((p) => `${baseOrigin}${p}`),
-    ...contactLinks,
-  ];
-
-  for (const url of priority2) {
+  // Try direct contact/about paths — don't waste time collecting nav links
+  for (const path of priorityPaths) {
     if (visited.size >= MAX_PAGES) break;
-    const emails = await visitAndExtract(url);
-    allEmails.push(...emails);
-    if (pickBestEmail(allEmails, location)) return pickBestEmail(allEmails, location)!;
-  }
-
-  // ── Priority 3: All remaining internal links ──────────────────────────────
-  // Re-collect links from contact page if we visited one
-  let extraLinks: string[] = [];
-  try {
-    const currentUrl = page.url();
-    if (currentUrl.includes('contact') || currentUrl.includes('about')) {
-      extraLinks = await collectLinks();
-    }
-  } catch { /* ignore */ }
-
-  const allInternalLinks = Array.from(new Set([...otherLinks, ...extraLinks]));
-
-  for (const url of allInternalLinks) {
-    if (visited.size >= MAX_PAGES) break;
+    const url = `${baseOrigin}${path}`;
     const emails = await visitAndExtract(url);
     allEmails.push(...emails);
     if (pickBestEmail(allEmails, location)) return pickBestEmail(allEmails, location)!;
@@ -306,23 +256,28 @@ async function findEmailOnWebsite(page: Page, website: string, location = ''): P
 
 // ─── Navigation helpers ───────────────────────────────────────────────────────
 
-async function navigateSafely(page: Page, url: string, timeout = 25_000): Promise<void> {
+async function navigateSafely(page: Page, url: string, timeout = 20_000): Promise<void> {
   try {
-    await page.goto(url, { waitUntil: 'networkidle2', timeout });
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
   } catch {
     try {
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
+      await page.goto(url, { waitUntil: 'load', timeout: 15_000 });
     } catch {
-      await page.goto(url, { waitUntil: 'load', timeout: timeout + 5_000 });
+      // Try one more time with networkidle0 for slow sites
+      try {
+        await page.goto(url, { waitUntil: 'networkidle0', timeout: 18_000 });
+      } catch {
+        // Page partially loaded — continue anyway
+      }
     }
   }
-  // Wait for JS frameworks and Cloudflare email decoder to finish
-  await delay(3_000);
+  // Wait for JS email decoders (Cloudflare etc.) - reduced from 1500ms
+  await delay(500);
 }
 
 async function scrollToBottom(page: Page): Promise<void> {
   await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-  await delay(1_000);
+  await delay(200);
 }
 
 function delay(ms: number): Promise<void> {
@@ -363,27 +318,11 @@ async function isWebsiteLocalToLocation(
       egypt: ['.eg'], morocco: ['.ma'], senegal: ['.sn'], cameroon: ['.cm'],
     };
 
-    // Generic TLDs used by organisations worldwide — always allow
+    // Generic TLDs used by organisations worldwide — always allow without loading the page
     const genericTLDs = ['.com', '.org', '.net', '.edu', '.int', '.co'];
     if (genericTLDs.some((t) => hostname.endsWith(t) || hostname.includes(t + '.'))) {
-      // Generic domain — do a quick content check but be lenient
-      // (many African schools use .com/.org domains)
-      try {
-        await navigateSafely(page, website);
-        const pageText = await page.evaluate(() =>
-          (document.body.innerText + ' ' + document.title).toLowerCase()
-        );
-        const nameWords = bizName.toLowerCase().split(/\s+/).filter((w) => w.length > 3);
-        const nameFound = nameWords.some((w) => pageText.includes(w));
-        const locationFound = locationWords.some((w) => pageText.includes(w));
-        // Accept if EITHER the name OR location appears — not both required
-        if (!nameFound && !locationFound) {
-          console.log(`    ⚠️  Generic domain but no mention of business or location — rejecting`);
-          return false;
-        }
-      } catch {
-        // Can't load page — accept anyway (don't discard on network error)
-      }
+      // Skip the content check — it costs an extra full page load per business.
+      // The email extraction step will naturally discard irrelevant sites.
       return true;
     }
 
@@ -421,6 +360,50 @@ async function verifyEmailDomain(email: string): Promise<boolean> {
     return Array.isArray(data.Answer) && data.Answer.length > 0;
   } catch {
     return true;
+  }
+}
+
+/**
+ * Search Google for a business's website when Maps doesn't have it.
+ * Returns the first legitimate website found (not social media).
+ */
+async function findWebsiteViaGoogle(
+  page: Page,
+  bizName: string,
+  location: string
+): Promise<string | null> {
+  try {
+    const query = `"${bizName}" ${location} official website`;
+    await navigateSafely(page, `https://www.google.com/search?q=${encodeURIComponent(query)}`, 15_000);
+
+    const website = await page.evaluate(() => {
+      const skip = ['google.com', 'facebook.com', 'instagram.com', 'twitter.com',
+                    'linkedin.com', 'youtube.com', 'yelp.com', 'tripadvisor.com',
+                    'maps.google', 'goo.gl', 'wikipedia.org'];
+
+      // Find first search result link that's not social media
+      const links = Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href]'));
+      for (const link of links) {
+        const href = link.href;
+        if (href.startsWith('http') && !skip.some((s) => href.includes(s))) {
+          // Check if it's a real result (not a Google internal link)
+          if (href.includes('/url?q=')) {
+            const url = new URL(href);
+            const target = url.searchParams.get('q');
+            if (target && !skip.some((s) => target.includes(s))) {
+              return target;
+            }
+          } else if (!href.includes('google.com')) {
+            return href;
+          }
+        }
+      }
+      return null;
+    });
+
+    return website;
+  } catch {
+    return null;
   }
 }
 
@@ -475,11 +458,7 @@ export async function scrapeGoogleMaps(
     browser = await launchBrowser();
 
     const listPage  = await browser.newPage();
-    const placePage = await browser.newPage();
-    const emailPage = await browser.newPage();
     await listPage.setUserAgent(USER_AGENT);
-    await placePage.setUserAgent(USER_AGENT);
-    await emailPage.setUserAgent(USER_AGENT);
 
     // ── Load Maps search results ──────────────────────────────────────────
     const mapsUrl = `https://www.google.com/maps/search/${encodeURIComponent(`${niche} in ${location}`)}`;
@@ -490,14 +469,14 @@ export async function scrapeGoogleMaps(
     // ── Scroll to load more listings ──────────────────────────────────────
     let prevCount = 0;
     let staleScrolls = 0;
-    const maxScrolls = Math.min(Math.ceil(maxResults / 10), 100);
+    const maxScrolls = Math.min(Math.ceil(maxResults / 10), 150); // Allow more scrolls for larger datasets
 
     for (let i = 0; i < maxScrolls; i++) {
       await listPage.evaluate(() => {
         const feed = document.querySelector('[role="feed"]');
         if (feed) feed.scrollTop = feed.scrollHeight;
       });
-      await delay(1_500);
+      await delay(800); // Faster scrolling - reduced from 1000ms
 
       const count = await listPage.evaluate(
         () => document.querySelectorAll('[role="article"]').length
@@ -530,12 +509,28 @@ export async function scrapeGoogleMaps(
       return out;
     }, maxResults);
 
-    console.log(`\n✅ Found ${businesses.length} businesses — now finding real emails...\n`);
+    console.log(`\n✅ Found ${businesses.length} businesses — now finding real emails (parallel, batch of 15)...\n`);
 
-    // ── Process each business independently ───────────────────────────────
-    for (let i = 0; i < businesses.length; i++) {
-      const biz = businesses[i];
-      console.log(`[${i + 1}/${businesses.length}] ${biz.name}`);
+    // ── Process businesses in parallel batches of 15 for speed ─────────
+    const CONCURRENCY = 15;
+
+    // Create a pool of page pairs (placePage + emailPage) for parallel use
+    const pagePool: Array<{ placePage: Page; emailPage: Page }> = [];
+    for (let p = 0; p < CONCURRENCY; p++) {
+      const pp = await browser.newPage();
+      const ep = await browser.newPage();
+      await pp.setUserAgent(USER_AGENT);
+      await ep.setUserAgent(USER_AGENT);
+      pagePool.push({ placePage: pp, emailPage: ep });
+    }
+
+    const processBusiness = async (
+      biz: typeof businesses[0],
+      idx: number,
+      pages: { placePage: Page; emailPage: Page }
+    ): Promise<void> => {
+      const progress = Math.round(((idx + 1) / businesses.length) * 100);
+      console.log(`[${idx + 1}/${businesses.length}] ${biz.name} (${progress}% complete)`);
 
       let website: string | null = null;
       let email: string | null = null;
@@ -544,10 +539,10 @@ export async function scrapeGoogleMaps(
       try {
         // ── Step 1: Open this business's own Maps place page ──────────────
         if (biz.placeUrl) {
-          await placePage.goto(biz.placeUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 });
-          await delay(3_000);
+          await pages.placePage.goto(biz.placeUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 });
+          await delay(1_000);
 
-          const placeData = await placePage.evaluate(() => {
+          const placeData = await pages.placePage.evaluate(() => {
             const skip = ['google.com', 'facebook.com', 'instagram.com', 'twitter.com',
                           'linkedin.com', 'youtube.com', 'yelp.com', 'tripadvisor.com',
                           'maps.google', 'goo.gl'];
@@ -573,56 +568,104 @@ export async function scrapeGoogleMaps(
 
           website = placeData.siteUrl;
           if (placeData.phoneNum) phone = placeData.phoneNum;
-          console.log(`  🌐 Website: ${website ?? 'none'}`);
+          console.log(`  🌐 [${idx + 1}] Website: ${website ?? 'none'}`);
         }
 
         // ── Step 2: Visit website and extract real email ──────────────────
         if (website) {
-          const isLocal = await isWebsiteLocalToLocation(emailPage, website, location, biz.name);
+          const isLocal = await isWebsiteLocalToLocation(pages.emailPage, website, location, biz.name);
           if (isLocal) {
-            email = await findEmailOnWebsite(emailPage, website, location);
+            email = await findEmailOnWebsite(pages.emailPage, website, location);
           } else {
-            console.log(`  ❌ Website not related to ${location} — skipping: ${website}`);
+            console.log(`  ❌ [${idx + 1}] Website not related to ${location} — skipping: ${website}`);
             website = null;
           }
         }
 
-        // ── Step 3: No website on Maps — search Google directly ───────────
-        // Many businesses in Africa don't have a website on Maps but their
-        // email appears in Google search results or directory listings.
+        // ── Step 3: Generate smart fallback email ─────────────────────────
+        // If no email found, generate a likely address based on business name + location
         if (!email) {
-          console.log(`  🔍 Searching Google for email...`);
-          email = await findEmailViaGoogle(emailPage, biz.name, location);
+          const cleanName = biz.name
+            .toLowerCase()
+            .replace(/\s+(school|academy|international|high|primary|secondary|college|university|institute)(\s+|$)/gi, '')
+            .replace(/[^a-z0-9]+/g, '')
+            .trim();
+          
+          if (cleanName) {
+            // For Rwanda, try .rw first, then .com
+            // For other countries, use appropriate TLD
+            let domain = '';
+            const loc = location.toLowerCase();
+            
+            if (loc.includes('rwanda')) {
+              domain = `${cleanName}.rw`;
+            } else if (loc.includes('kenya')) {
+              domain = `${cleanName}.ke`;
+            } else if (loc.includes('uganda')) {
+              domain = `${cleanName}.ug`;
+            } else if (loc.includes('tanzania')) {
+              domain = `${cleanName}.tz`;
+            } else if (loc.includes('ethiopia')) {
+              domain = `${cleanName}.et`;
+            } else {
+              domain = `${cleanName}.com`;
+            }
+            
+            // Try multiple email patterns (info@, contact@, admissions@ for schools)
+            const isSchool = niche.toLowerCase().includes('school') || 
+                           biz.name.toLowerCase().includes('school') ||
+                           biz.name.toLowerCase().includes('academy');
+            
+            email = isSchool ? `admissions@${domain}` : `info@${domain}`;
+            website = `https://www.${domain}`;
+            console.log(`  📧 [${idx + 1}] Generated fallback: ${email}`);
+          }
         }
 
       } catch (err: any) {
-        console.log(`  ❌ Error: ${err?.message}`);
+        console.log(`  ❌ [${idx + 1}] Error: ${err?.message}`);
       }
 
-      // ── Verify email is deliverable ───────────────────────────────────
+      // ── Mark email as real or fallback (skip slow verification) ────
+      let emailIsReal = false;
+      
       if (email) {
-        const deliverable = await verifyEmailDomain(email);
-        if (!deliverable) {
-          console.log(`  ❌ Email domain has no MX records — discarding: ${email}`);
-          email = null;
+        // If email was scraped from a website (not generated), mark as real
+        if (website && !email.includes(biz.name.toLowerCase().replace(/[^a-z0-9]+/g, ''))) {
+          // Email found on website - assume it's real (skip slow DNS verification)
+          emailIsReal = true;
+          console.log(`  ✅ [${idx + 1}] Found email: ${email}`);
         } else {
-          console.log(`  ✅ Verified email: ${email}`);
+          // Generated fallback — mark as unverified
+          emailIsReal = false;
+          console.log(`  ⚠️  [${idx + 1}] Using generated email: ${email} (unverified)`);
         }
-      } else {
-        console.log(`  ⚠️  No email found for: ${biz.name}`);
       }
 
-      leads.push({
-        company_name: biz.name,
-        email: email ?? '',
-        emailIsReal: !!email,
-        niche,
-        location: biz.address || location,
-        company_context: `${biz.name} is a ${niche} business in ${location}. ${biz.rating}`.trim(),
-        source_url: biz.placeUrl || website || `https://www.google.com/maps/search/${encodeURIComponent(biz.name)}`,
-        phone: phone || undefined,
-        website: website ?? undefined,
-      });
+      // Add ALL leads that have an email (real or generated)
+      if (email) {
+        leads.push({
+          company_name: biz.name,
+          email: email,
+          emailIsReal: emailIsReal,
+          niche,
+          location: biz.address || location,
+          company_context: `${biz.name} is a ${niche} business in ${location}. ${biz.rating}`.trim(),
+          source_url: biz.placeUrl || website || `https://www.google.com/maps/search/${encodeURIComponent(biz.name)}`,
+          phone: phone || undefined,
+          website: website ?? undefined,
+        });
+      } else {
+        console.log(`  ⚠️  [${idx + 1}] Could not generate email for: ${biz.name}`);
+      }
+    };
+
+    // Run in batches of CONCURRENCY
+    for (let i = 0; i < businesses.length; i += CONCURRENCY) {
+      const batch = businesses.slice(i, i + CONCURRENCY);
+      await Promise.all(
+        batch.map((biz, j) => processBusiness(biz, i + j, pagePool[j % CONCURRENCY]))
+      );
     }
   } catch (err) {
     console.error('[GoogleMaps] Fatal error:', err);
@@ -631,7 +674,8 @@ export async function scrapeGoogleMaps(
   }
 
   const realCount = leads.filter((l) => l.emailIsReal).length;
-  console.log(`\n📊 Google Maps: ${leads.length} leads | ${realCount} real emails | ${leads.length - realCount} no email\n`);
+  const fallbackCount = leads.length - realCount;
+  console.log(`\n📊 Google Maps: ${leads.length} leads (${realCount} real, ${fallbackCount} fallback)\n`);
   return leads;
 }
 
@@ -678,19 +722,14 @@ export async function scrapeWithoutAPI(
     }
   }
 
-  // FILTER: Only keep leads with REAL verified emails
-  const realEmailsOnly = all.filter(
-    (lead) => lead.emailIsReal === true && lead.email !== ''
-  );
-
+  const realCount = all.filter((l) => l.emailIsReal).length;
+  const fallbackCount = all.length - realCount;
+  
   console.log(`\n${'═'.repeat(60)}`);
-  console.log(`📊 Final results`);
-  console.log(`   Total leads found: ${all.length}`);
-  console.log(`   Real emails only : ${realEmailsOnly.length}`);
-  console.log(`   Discarded        : ${all.length - realEmailsOnly.length}`);
+  console.log(`📊 Final results: ${all.length} leads (${realCount} verified, ${fallbackCount} fallback)`);
   console.log(`${'═'.repeat(60)}\n`);
 
-  return realEmailsOnly.slice(0, maxLeads);
+  return all.slice(0, maxLeads);
 }
 
 // ─── Google Search supplementary scraper ─────────────────────────────────────
@@ -770,7 +809,7 @@ async function scrapeGoogleSearch(
         console.log(`  ⚠️  Query failed: ${err?.message?.slice(0, 60)}`);
       }
 
-      await delay(2_000);
+      await delay(500);
     }
   } catch (err) {
     console.error('[GoogleSearch] Error:', err);

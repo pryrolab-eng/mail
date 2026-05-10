@@ -144,8 +144,10 @@ export default function ScraperModule({ userId, onLeadsAdded, onGenerateEmails }
         niche: l.niche,
         location: l.location,
         company_context: l.company_context,
-        status: "New",
+        status: "new",
         source: "scraper",
+        confidence_score: (l as any).emailIsReal ? 90 : 40,
+        email_verified: (l as any).emailIsReal ?? false,
       }));
 
       const { error } = await supabase.from("leads").insert(inserts);
