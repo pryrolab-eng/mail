@@ -77,8 +77,18 @@ export default function FollowUpModule({ userId }: FollowUpModuleProps) {
       .on("postgres_changes", { event: "*", schema: "public", table: "email_replies" }, () => fetchData())
       .subscribe();
     
+    // Subscribe to sent_emails changes to track bounces and failures
+    const sentEmailsChannel = supabase
+      .channel("sent_emails_changes")
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "sent_emails" }, (payload) => {
+        console.log("Sent email status changed:", payload);
+        fetchData(); // Refresh all data when email status changes
+      })
+      .subscribe();
+    
     return () => { 
-      repliesChannel.unsubscribe(); 
+      repliesChannel.unsubscribe();
+      sentEmailsChannel.unsubscribe();
     };
   }, [fetchData, supabase]);
 
@@ -334,6 +344,7 @@ export default function FollowUpModule({ userId }: FollowUpModuleProps) {
                         <span className={`px-2 py-0.5 text-xs font-medium rounded ${
                           email.status === "replied" ? "bg-green-50 text-green-700" :
                           email.status === "opened" ? "bg-yellow-50 text-yellow-700" :
+                          email.status === "failed" || email.status === "bounced" ? "bg-red-50 text-red-700" :
                           "bg-blue-50 text-blue-700"
                         }`}>
                           {email.status?.toUpperCase()}
@@ -342,6 +353,11 @@ export default function FollowUpModule({ userId }: FollowUpModuleProps) {
                       <p className="text-sm text-gray-700 mb-1">{email.subject}</p>
                       <p className="text-xs text-gray-500">
                         {lead?.email} • {new Date(email.sent_at).toLocaleDateString()} at {new Date(email.sent_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        {(email.status === "failed" || email.status === "bounced") && email.bounce_reason && (
+                          <span className="block mt-1 text-red-600">
+                            ⚠️ {email.bounce_reason}
+                          </span>
+                        )}
                       </p>
                     </div>
                   </div>

@@ -154,7 +154,7 @@ async function scrapeWebsiteForEmail(companyName: string, website?: string): Pro
           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
           'Accept-Language': 'en-US,en;q=0.9',
         },
-        signal: AbortSignal.timeout(6000), // Reduced from 8000ms
+        signal: AbortSignal.timeout(4000), // Reduced from 6000ms for speed
       });
 
       if (response.ok) {
@@ -184,7 +184,7 @@ async function scrapeWebsiteForEmail(companyName: string, website?: string): Pro
         if (url.includes('contact') && emails.size > 0) break;
       }
 
-      await new Promise(resolve => setTimeout(resolve, 500));
+      await new Promise(resolve => setTimeout(resolve, 300)); // Reduced from 500ms
     } catch (e) {
       console.error(`Failed to fetch ${url}:`, e);
     }
@@ -262,7 +262,7 @@ export async function findRealEmail(
     useGoogle = false, // Disabled by default - too slow and unreliable
     useWebsite = true,
     useLinkedIn = false, // Disabled by default - requires auth
-    timeout = 15000, // Reduced from 30000ms
+    timeout = 10000, // Reduced from 15000ms for speed
   } = options;
   
   console.log(`\n[Email Finder] Starting search for: ${companyName}`);

@@ -300,8 +300,24 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
             tone, model_used: generatedEmail.model,
           });
         }
-      } else { handleSendError(res, data); }
-    } catch { toast.error("Network error"); }
+      } else { 
+        handleSendError(res, data);
+        // Update lead status to 'failed' on error
+        const updatedLeadId = data.leadId ?? (isDbLead ? selectedLead!.id : null);
+        if (updatedLeadId) {
+          setSelectedLead((prev) => prev ? { ...prev, status: "failed" } : prev);
+          setLeads((prev) => prev.map((l) =>
+            l.id === updatedLeadId ? { ...l, status: "failed" } : l
+          ));
+        }
+        // Refresh leads from database to get latest status
+        await fetchLeads();
+      }
+    } catch { 
+      toast.error("Network error");
+      // Refresh leads on network error too
+      await fetchLeads();
+    }
     finally { setIsSendingSingle(false); }
   };
 

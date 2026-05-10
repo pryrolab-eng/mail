@@ -138,7 +138,7 @@ export async function scrapeWithGooglePlaces(
             useGoogle: false,  // Disabled - too slow
             useWebsite: true,
             useLinkedIn: false, // Disabled - requires auth
-            timeout: 12_000,    // Reduced from 15_000
+            timeout: 8_000,    // Reduced from 12_000 for speed
           });
 
           if (found.email) {
@@ -177,7 +177,7 @@ export async function scrapeWithGooglePlaces(
 
         console.log(`✓ Lead added: ${result.name} — ${email}\n`);
 
-        await delay(300);
+        await delay(200); // Reduced from 300ms for speed
       } catch (err) {
         console.error('[Places] Error fetching place details:', err);
       }

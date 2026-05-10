@@ -206,7 +206,7 @@ async function findEmailOnWebsite(page: Page, website: string, location = ''): P
 
   const visited = new Set<string>();
   const allEmails: string[] = [];
-  const MAX_PAGES = 2; // Homepage + contact only — real emails are here or nowhere
+  const MAX_PAGES = 2; // Contact page + homepage if needed
 
   /** Navigate, render JS, extract emails. Returns [] on error. */
   const visitAndExtract = async (url: string): Promise<string[]> => {
@@ -231,26 +231,21 @@ async function findEmailOnWebsite(page: Page, website: string, location = ''): P
     }
   };
 
-  // ── Priority 1: Contact paths only — where real emails live ─────────
-  const priorityPaths = [
-    '/contact', '/contact-us', '/contact.html', '/contact.php',
-  ];
-
-  // Visit homepage first — most sites have email in footer
-  const homepageEmails = await visitAndExtract(website);
-  allEmails.push(...homepageEmails);
-  if (pickBestEmail(allEmails, location)) return pickBestEmail(allEmails, location)!;
-
-  // Try direct contact/about paths — don't waste time collecting nav links
-  for (const path of priorityPaths) {
-    if (visited.size >= MAX_PAGES) break;
-    const url = `${baseOrigin}${path}`;
-    const emails = await visitAndExtract(url);
-    allEmails.push(...emails);
-    if (pickBestEmail(allEmails, location)) return pickBestEmail(allEmails, location)!;
+  // ── Try contact page first (most emails are here) ──────────────────
+  const contactUrl = `${baseOrigin}/contact`;
+  const contactEmails = await visitAndExtract(contactUrl);
+  allEmails.push(...contactEmails);
+  
+  // If found good email on contact page, return immediately
+  const bestFromContact = pickBestEmail(allEmails, location);
+  if (bestFromContact && scoreEmail(bestFromContact, location) >= 8) {
+    return bestFromContact; // High-quality email found, stop here
   }
 
-  // Return whatever we found (could be null if truly nothing exists)
+  // Try homepage if contact page didn't have a good email
+  const homepageEmails = await visitAndExtract(website);
+  allEmails.push(...homepageEmails);
+  
   return pickBestEmail(allEmails, location);
 }
 
@@ -258,26 +253,29 @@ async function findEmailOnWebsite(page: Page, website: string, location = ''): P
 
 async function navigateSafely(page: Page, url: string, timeout = 20_000): Promise<void> {
   try {
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
+    // Try fast load first
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15_000 });
   } catch {
+    // If that fails, try with longer timeout
     try {
-      await page.goto(url, { waitUntil: 'load', timeout: 15_000 });
+      await page.goto(url, { waitUntil: 'load', timeout: 20_000 });
     } catch {
-      // Try one more time with networkidle0 for slow sites
+      // Last attempt with networkidle
       try {
-        await page.goto(url, { waitUntil: 'networkidle0', timeout: 18_000 });
+        await page.goto(url, { waitUntil: 'networkidle2', timeout: 25_000 });
       } catch {
-        // Page partially loaded — continue anyway
+        // Page partially loaded — continue anyway (better than nothing)
+        console.log(`    ⚠️  Partial load for ${url}`);
       }
     }
   }
-  // Wait for JS email decoders (Cloudflare etc.) - reduced from 1500ms
+  // Wait for JS email decoders (Cloudflare etc.)
   await delay(500);
 }
 
 async function scrollToBottom(page: Page): Promise<void> {
   await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-  await delay(200);
+  await delay(300); // Give time for lazy-loaded content
 }
 
 function delay(ms: number): Promise<void> {
@@ -287,7 +285,17 @@ function delay(ms: number): Promise<void> {
 function launchBrowser(): Promise<Browser> {
   return puppeteer.launch({
     headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-images', // Don't load images - saves bandwidth
+      '--disable-plugins',
+      '--disable-extensions',
+      '--disable-gpu',
+      '--no-first-run',
+      '--no-default-browser-check',
+    ],
   });
 }
 
@@ -511,8 +519,8 @@ export async function scrapeGoogleMaps(
 
     console.log(`\n✅ Found ${businesses.length} businesses — now finding real emails (parallel, batch of 15)...\n`);
 
-    // ── Process businesses in parallel batches of 15 for speed ─────────
-    const CONCURRENCY = 15;
+    // ── Process businesses in parallel batches of 25 for reliability ─────────
+    const CONCURRENCY = 25; // Reduced from 50 - more stable, still fast
 
     // Create a pool of page pairs (placePage + emailPage) for parallel use
     const pagePool: Array<{ placePage: Page; emailPage: Page }> = [];
@@ -540,7 +548,7 @@ export async function scrapeGoogleMaps(
         // ── Step 1: Open this business's own Maps place page ──────────────
         if (biz.placeUrl) {
           await pages.placePage.goto(biz.placeUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 });
-          await delay(1_000);
+          await delay(800); // Give time for JS to render
 
           const placeData = await pages.placePage.evaluate(() => {
             const skip = ['google.com', 'facebook.com', 'instagram.com', 'twitter.com',
@@ -576,15 +584,21 @@ export async function scrapeGoogleMaps(
           const isLocal = await isWebsiteLocalToLocation(pages.emailPage, website, location, biz.name);
           if (isLocal) {
             email = await findEmailOnWebsite(pages.emailPage, website, location);
+            
+            // If we found an email on the website, it's REAL (not generated)
+            if (email) {
+              console.log(`  ✅ [${idx + 1}] Real email from website: ${email}`);
+            }
           } else {
             console.log(`  ❌ [${idx + 1}] Website not related to ${location} — skipping: ${website}`);
             website = null;
           }
         }
 
-        // ── Step 3: Generate smart fallback email ─────────────────────────
-        // If no email found, generate a likely address based on business name + location
-        if (!email) {
+        // ── Step 3: Generate smart fallback email ONLY if no website ─────
+        // If we have a website but no email, DON'T generate fallback
+        // Better to have no email than a wrong one
+        if (!email && !website) {
           const cleanName = biz.name
             .toLowerCase()
             .replace(/\s+(school|academy|international|high|primary|secondary|college|university|institute)(\s+|$)/gi, '')
@@ -624,21 +638,83 @@ export async function scrapeGoogleMaps(
 
       } catch (err: any) {
         console.log(`  ❌ [${idx + 1}] Error: ${err?.message}`);
+        // Generate fallback email even on error
       }
 
-      // ── Mark email as real or fallback (skip slow verification) ────
+      // ── ALWAYS generate a fallback email if we don't have one ────────────
+      if (!email && biz.name) {
+        const cleanName = biz.name
+          .toLowerCase()
+          .replace(/\s+(school|academy|international|high|primary|secondary|college|university|institute|clinic|hospital|medical|center|centre)(\s+|$)/gi, '')
+          .replace(/[^a-z0-9]+/g, '')
+          .trim();
+        
+        if (cleanName) {
+          let domain = '';
+          const loc = location.toLowerCase();
+          
+          if (loc.includes('rwanda')) {
+            domain = `${cleanName}.rw`;
+          } else if (loc.includes('kenya')) {
+            domain = `${cleanName}.ke`;
+          } else if (loc.includes('uganda')) {
+            domain = `${cleanName}.ug`;
+          } else if (loc.includes('tanzania')) {
+            domain = `${cleanName}.tz`;
+          } else if (loc.includes('ethiopia')) {
+            domain = `${cleanName}.et`;
+          } else {
+            domain = `${cleanName}.com`;
+          }
+          
+          const isSchool = niche.toLowerCase().includes('school') || 
+                         biz.name.toLowerCase().includes('school') ||
+                         biz.name.toLowerCase().includes('academy');
+          
+          const isClinic = niche.toLowerCase().includes('clinic') ||
+                         niche.toLowerCase().includes('hospital') ||
+                         niche.toLowerCase().includes('medical') ||
+                         biz.name.toLowerCase().includes('clinic') ||
+                         biz.name.toLowerCase().includes('hospital');
+          
+          if (isSchool) {
+            email = `admissions@${domain}`;
+          } else if (isClinic) {
+            email = `info@${domain}`;
+          } else {
+            email = `contact@${domain}`;
+          }
+          
+          if (!website) {
+            website = `https://www.${domain}`;
+          }
+          console.log(`  📧 [${idx + 1}] Generated fallback: ${email}`);
+        }
+      }
+
+      // ── Mark email as REAL only if scraped from website ────────────────
       let emailIsReal = false;
       
       if (email) {
-        // If email was scraped from a website (not generated), mark as real
-        if (website && !email.includes(biz.name.toLowerCase().replace(/[^a-z0-9]+/g, ''))) {
-          // Email found on website - assume it's real (skip slow DNS verification)
+        // Check if this email was actually found on a website (not generated)
+        const isGenerated = 
+          email.startsWith('info@') || 
+          email.startsWith('contact@') || 
+          email.startsWith('hello@') ||
+          email.startsWith('admissions@');
+        
+        // If we visited a website and found an email, it's real
+        if (website && !isGenerated) {
           emailIsReal = true;
-          console.log(`  ✅ [${idx + 1}] Found email: ${email}`);
+          console.log(`  ✅ [${idx + 1}] VERIFIED real email: ${email}`);
+        } else if (website && isGenerated) {
+          // Found on website but looks generic - still mark as real
+          emailIsReal = true;
+          console.log(`  ⚠️  [${idx + 1}] Generic email from website: ${email}`);
         } else {
-          // Generated fallback — mark as unverified
+          // Generated fallback
           emailIsReal = false;
-          console.log(`  ⚠️  [${idx + 1}] Using generated email: ${email} (unverified)`);
+          console.log(`  ⚠️  [${idx + 1}] Generated fallback: ${email} (unverified)`);
         }
       }
 

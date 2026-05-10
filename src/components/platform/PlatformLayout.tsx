@@ -11,6 +11,8 @@ import AISettingsModule from "./AISettingsModule";
 import SMTPManager from "./SMTPManager";
 import FollowUpModule from "./FollowUpModule";
 import AnalyticsDashboard from "./AnalyticsDashboard";
+import CampaignsModule from "./CampaignsModule";
+import TemplatesModule from "./TemplatesModule";
 import { createClient } from "../../../supabase/client";
 import { useRouter } from "next/navigation";
 
@@ -153,55 +155,13 @@ export default function PlatformLayout({ userId, userEmail }: PlatformLayoutProp
           </LazyModule>
 
           <LazyModule active={activeModule === "campaigns"}>
-            <CampaignsPlaceholder userId={userId} onNavigate={handleModuleChange} />
+            <CampaignsModule userId={userId} />
           </LazyModule>
 
           <LazyModule active={activeModule === "templates"}>
-            <TemplatesPlaceholder userId={userId} />
+            <TemplatesModule userId={userId} />
           </LazyModule>
         </main>
-      </div>
-    </div>
-  );
-}
-
-// ─── Placeholder modules (to be built out) ───────────────────────────────────
-
-function CampaignsPlaceholder({ userId, onNavigate }: { userId: string; onNavigate: (m: ActiveModule) => void }) {
-  return (
-    <div className="flex flex-col items-center justify-center h-full min-h-[400px] gap-4 p-8">
-      <div className="w-16 h-16 rounded-2xl bg-blue-50 flex items-center justify-center">
-        <span className="text-3xl">📣</span>
-      </div>
-      <div className="text-center">
-        <h2 className="text-xl font-bold text-gray-900">Campaigns</h2>
-        <p className="text-sm text-gray-500 mt-2 max-w-md">
-          Create targeted email campaigns, schedule sends, and track performance.
-          Use the <strong>Email Writer</strong> to generate and send bulk emails now.
-        </p>
-      </div>
-      <button
-        onClick={() => onNavigate("email-writer")}
-        className="px-5 py-2.5 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:bg-blue-700 transition-colors"
-      >
-        Go to Email Writer →
-      </button>
-    </div>
-  );
-}
-
-function TemplatesPlaceholder({ userId }: { userId: string }) {
-  return (
-    <div className="flex flex-col items-center justify-center h-full min-h-[400px] gap-4 p-8">
-      <div className="w-16 h-16 rounded-2xl bg-purple-50 flex items-center justify-center">
-        <span className="text-3xl">📝</span>
-      </div>
-      <div className="text-center">
-        <h2 className="text-xl font-bold text-gray-900">Email Templates</h2>
-        <p className="text-sm text-gray-500 mt-2 max-w-md">
-          Save and reuse your best-performing email templates across campaigns.
-          Templates are saved automatically when you generate emails in the Email Writer.
-        </p>
       </div>
     </div>
   );
