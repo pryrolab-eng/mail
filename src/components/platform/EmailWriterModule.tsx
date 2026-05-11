@@ -68,7 +68,8 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
   const [isSendingBulk, setIsSendingBulk]     = useState(false);
   const [bulkTone, setBulkTone]               = useState<ToneType>("Direct");
   const [bulkPainPoint, setBulkPainPoint]     = useState("");
-  const [categoryFilter, setCategoryFilter]   = useState("all");
+  const [nicheFilter, setNicheFilter]         = useState("all");
+  const [bulkUseWebResearch, setBulkUseWebResearch] = useState(false);
 
   // ── Init ──────────────────────────────────────────────────────────────────
   useEffect(() => { fetchLeads(); loadSenderProfile(); }, []);
@@ -94,32 +95,39 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
     }
   };
 
-  /** Load saved company/service from user profile so users don't re-enter every time */
+  /** Load saved company/service from followup_settings */
   const loadSenderProfile = async () => {
     const { data } = await supabase
-      .from("users")
-      .select("sender_company, sender_service")
-      .eq("id", userId)
-      .single();
+      .from("followup_settings")
+      .select("your_company, your_service")
+      .eq("user_id", userId)
+      .maybeSingle();
     if (data) {
-      if (data.sender_company) setYourCompany(data.sender_company);
-      if (data.sender_service) setYourService(data.sender_service);
+      if (data.your_company) setYourCompany(data.your_company);
+      if (data.your_service) setYourService(data.your_service);
     }
   };
 
-  /** Save company/service to user profile */
+  /** Save company/service to followup_settings (upsert) */
   const saveSenderProfile = async (company: string, service: string) => {
     await supabase
-      .from("users")
-      .update({ sender_company: company, sender_service: service })
-      .eq("id", userId);
+      .from("followup_settings")
+      .upsert(
+        { user_id: userId, your_company: company, your_service: service, updated_at: new Date().toISOString() },
+        { onConflict: "user_id" }
+      );
     setProfileSaved(true);
     setTimeout(() => setProfileSaved(false), 2000);
   };
 
-  const filteredLeads = categoryFilter === "all"
+  const filteredLeads = nicheFilter === "all"
     ? leads
-    : leads.filter((l) => l.niche === categoryFilter);
+    : leads.filter((l) => l.niche === nicheFilter);
+
+  // Split filtered leads into unsent vs already contacted
+  const SENT_STATUSES = new Set(["contacted", "Email Sent", "opened", "clicked", "replied", "Replied", "interested", "Interested", "Closed"]);
+  const unsentLeads  = filteredLeads.filter((l) => !SENT_STATUSES.has(l.status));
+  const alreadySent  = filteredLeads.filter((l) => SENT_STATUSES.has(l.status));
 
   const searchedLeads = leadSearch.trim()
     ? leads.filter((l) =>
@@ -343,9 +351,9 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
   };
 
   const selectAll = () => {
-    const allSelected = filteredLeads.every((l) => selectedLeadIds.has(l.id));
+    const allSelected = unsentLeads.every((l) => selectedLeadIds.has(l.id));
     const n = new Set(selectedLeadIds);
-    filteredLeads.forEach((l) => allSelected ? n.delete(l.id) : n.add(l.id));
+    unsentLeads.forEach((l) => allSelected ? n.delete(l.id) : n.add(l.id));
     setSelectedLeadIds(n);
   };
 
@@ -355,92 +363,120 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
     await saveSenderProfile(yourCompany, yourService);
     setIsGenerating(true);
     setBulkEmails([]);
+
+    const selected = leads.filter((l) => selectedLeadIds.has(l.id));
+    const toastId = toast.loading(`Generating ${selected.length} emails on server… this may take a minute`);
+
     try {
-      const selected = leads.filter((l) => selectedLeadIds.has(l.id));
-      const emails: any[] = [];
-      let successCount = 0;
-      let failCount = 0;
-      
-      for (let i = 0; i < selected.length; i++) {
-        const lead = selected[i];
-        try {
-          const { generateAIEmail } = await import("@/utils/ai-email-generator");
-          const { subject, body } = await generateAIEmail({
-            lead: { company_name: lead.company_name, niche: lead.niche, location: lead.location, company_context: lead.company_context },
-            yourCompany,
-            yourService,
-            tone: bulkTone,
-            customPainPoint: bulkPainPoint || undefined,
-            userId,
-          });
-          emails.push({ 
-            lead, lead_email: lead.email, company_name: lead.company_name, 
-            subject, body, model: "AI", isEditing: false,
-            editSubject: subject, editBody: body,
-          });
-          successCount++;
-          if (i < selected.length - 1) await new Promise(resolve => setTimeout(resolve, 1500));
-        } catch (error: any) {
-          failCount++;
-          if (error.message?.includes('rate limit')) {
-            toast.warning(`Rate limit hit. Waiting 5 seconds…`);
-            await new Promise(resolve => setTimeout(resolve, 5000));
-            try {
-              const { generateAIEmail } = await import("@/utils/ai-email-generator");
-              const { subject, body } = await generateAIEmail({
-                lead: { company_name: lead.company_name, niche: lead.niche, location: lead.location, company_context: lead.company_context },
-                yourCompany, yourService, tone: bulkTone,
-                customPainPoint: bulkPainPoint || undefined, userId,
-              });
-              emails.push({ lead, lead_email: lead.email, company_name: lead.company_name, subject, body, model: "AI", isEditing: false, editSubject: subject, editBody: body });
-              successCount++; failCount--;
-            } catch {
-              emails.push({ lead, lead_email: lead.email, company_name: lead.company_name,
-                subject: `Quick question about ${lead.company_name}`,
-                body: `Hi,\n\nI came across ${lead.company_name} and wanted to reach out about ${yourService}.\n\nWould you be open to a quick call?\n\nBest,\n${yourCompany}`,
-                model: "Fallback", isEditing: false,
-                editSubject: `Quick question about ${lead.company_name}`,
-                editBody: `Hi,\n\nI came across ${lead.company_name} and wanted to reach out about ${yourService}.\n\nWould you be open to a quick call?\n\nBest,\n${yourCompany}`,
-              });
-            }
-          } else {
-            emails.push({ lead, lead_email: lead.email, company_name: lead.company_name,
-              subject: `Quick question about ${lead.company_name}`,
-              body: `Hi,\n\nI came across ${lead.company_name} and wanted to reach out about ${yourService}.\n\nWould you be open to a quick call?\n\nBest,\n${yourCompany}`,
-              model: "Fallback", isEditing: false,
-              editSubject: `Quick question about ${lead.company_name}`,
-              editBody: `Hi,\n\nI came across ${lead.company_name} and wanted to reach out about ${yourService}.\n\nWould you be open to a quick call?\n\nBest,\n${yourCompany}`,
-            });
-          }
-        }
-        setBulkEmails([...emails]);
+      const res = await fetch("/api/generate-emails-bulk", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          leads: selected.map((l) => ({
+            id: l.id,
+            company_name: l.company_name,
+            niche: l.niche,
+            location: l.location,
+            company_context: l.company_context,
+            email: l.email,
+          })),
+          yourCompany,
+          yourService,
+          tone: bulkTone,
+          customPainPoint: bulkPainPoint || undefined,
+        }),
+      });
+
+      const data = await res.json();
+      toast.dismiss(toastId);
+
+      if (!res.ok || !data.success) {
+        toast.error(data.error || "Failed to generate emails");
+        return;
       }
-      
+
+      // Map server results back to the bulk email preview format
+      const emails = (data.emails as any[]).map((e) => ({
+        lead: selected.find((l) => l.id === e.lead_id) ?? null,
+        lead_email: e.lead_email,
+        company_name: e.company_name,
+        subject: e.subject,
+        body: e.body,
+        model: e.model,
+        isFallback: e.isFallback,
+        isEditing: false,
+        editSubject: e.subject,
+        editBody: e.body,
+      }));
+
+      setBulkEmails(emails);
       setPreviewIndex(0);
-      toast.success(failCount > 0 ? `Generated ${successCount} emails (${failCount} used fallback)` : `Generated ${emails.length} emails!`);
-    } catch (error: any) { 
-      toast.error(error.message || "Failed to generate emails"); 
-    } finally { setIsGenerating(false); }
+
+      const { ai, fallback, rateLimitHits } = data.stats;
+      if (fallback === 0) {
+        toast.success(`✅ Generated ${ai} AI emails!`);
+      } else if (ai === 0) {
+        toast.warning(`⚠️ All ${fallback} emails used fallback template (rate limit). Review before sending.`);
+      } else {
+        toast.success(`Generated ${ai} AI + ${fallback} fallback emails${rateLimitHits > 0 ? " (rate limit hit)" : ""}`);
+      }
+    } catch (err: any) {
+      toast.dismiss(toastId);
+      toast.error(err.message || "Network error — could not reach generation server");
+    } finally {
+      setIsGenerating(false);
+    }
   };
 
   const sendBulkEmails = async () => {
     if (bulkEmails.length === 0) return;
     setIsSendingBulk(true);
+    const sendToastId = toast.loading(`Sending ${bulkEmails.length} emails...`);
     try {
-      // Use edited versions if available
+      // Always use the edited versions — these are exactly what the user reviewed
       const emailsToSend = bulkEmails.map(email => ({
-        ...email,
+        lead_id: email.lead?.id || "",
+        lead_email: email.lead_email,
+        company_name: email.company_name,
         subject: email.editSubject || email.subject,
         body: email.editBody || email.body,
       }));
       
       const { sendBulkEmailsChunkedAction } = await import("@/app/actions");
-      const result = await sendBulkEmailsChunkedAction(userId, emailsToSend, { chunkSize: 100, delayBetweenEmails: 2000, verifyEmails: true });
+      const result = await sendBulkEmailsChunkedAction(userId, emailsToSend, { 
+        chunkSize: 100, 
+        delayBetweenEmails: 1500, 
+        verifyEmails: false, // Skip DNS check — user already reviewed emails
+      });
+      
+      toast.dismiss(sendToastId);
+      
       if (result.success) {
-        toast.success((result as any).message || "Emails sent!");
-        setBulkEmails([]); setMode("single"); setSelectedLeadIds(new Set()); fetchLeads();
-      } else { toast.error(result.error || "Failed"); }
-    } catch { toast.error("Error sending"); }
+        const r = (result as any).results;
+        const sent = r?.sent ?? 0;
+        const failed = r?.failed ?? 0;
+        const total = r?.total ?? emailsToSend.length;
+        
+        if (failed === 0) {
+          toast.success(`✅ All ${sent} emails sent successfully!`);
+        } else if (sent === 0) {
+          toast.error(`❌ All ${failed} emails failed. Check your SMTP account in SMTP Manager.`);
+        } else {
+          toast.warning(`📊 ${sent} sent, ${failed} failed out of ${total} total.`);
+        }
+        
+        setBulkEmails([]);
+        setMode("single");
+        setSelectedLeadIds(new Set());
+        // Refresh leads so CRM shows updated statuses
+        fetchLeads();
+      } else { 
+        toast.error(result.error || "Failed to send emails");
+      }
+    } catch (err: any) { 
+      toast.dismiss(sendToastId);
+      toast.error(err?.message || "Error sending emails");
+    }
     finally { setIsSendingBulk(false); }
   };
 
@@ -479,7 +515,7 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
           </button>
         ))}
         {mode === "bulk" && (
-          <span className="ml-auto text-sm text-gray-500">{selectedLeadIds.size} of {leads.length} selected</span>
+          <span className="ml-auto text-sm text-gray-500">{selectedLeadIds.size} selected · {leads.filter(l => !SENT_STATUSES.has(l.status)).length} unsent</span>
         )}
       </div>
 
@@ -809,21 +845,33 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
                     className="w-full px-4 py-3 rounded-xl text-sm border border-gray-300 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 bg-white outline-none transition-all" />
                 </div>
 
-                {/* Category filter */}
+                {/* Niche filter — clicking a niche auto-selects all leads in it */}
                 {categories.length > 0 && (
                   <div>
-                    <label className="block text-xs font-semibold uppercase tracking-widest mb-2 text-gray-500">Filter by Category</label>
+                    <label className="block text-xs font-semibold uppercase tracking-widest mb-2 text-gray-500">
+                      Filter by Niche <span className="normal-case font-normal text-gray-400">(click to auto-select all leads in that niche)</span>
+                    </label>
                     <div className="flex flex-wrap gap-2">
-                      <button onClick={() => setCategoryFilter("all")}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-medium border-2 transition-all ${categoryFilter === "all" ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-600 border-gray-200 hover:border-blue-400"}`}>
-                        All ({leads.length})
+                      <button onClick={() => { setNicheFilter("all"); setSelectedLeadIds(new Set()); }}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-medium border-2 transition-all ${nicheFilter === "all" ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-600 border-gray-200 hover:border-blue-400"}`}>
+                        All ({leads.filter(l => !SENT_STATUSES.has(l.status)).length} unsent)
                       </button>
-                      {categories.map((cat) => (
-                        <button key={cat} onClick={() => setCategoryFilter(cat)}
-                          className={`px-3 py-1.5 rounded-lg text-xs font-medium border-2 transition-all ${categoryFilter === cat ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-600 border-gray-200 hover:border-blue-400"}`}>
-                          {cat} ({leads.filter((l) => l.niche === cat).length})
-                        </button>
-                      ))}
+                      {categories.map((cat) => {
+                        const catUnsent = leads.filter((l) => l.niche === cat && !SENT_STATUSES.has(l.status));
+                        const catSent   = leads.filter((l) => l.niche === cat && SENT_STATUSES.has(l.status));
+                        return (
+                          <button key={cat} onClick={() => {
+                            setNicheFilter(cat);
+                            // Auto-select ONLY unsent leads in this niche
+                            setSelectedLeadIds(new Set(catUnsent.map(l => l.id)));
+                          }}
+                            className={`px-3 py-1.5 rounded-lg text-xs font-medium border-2 transition-all ${nicheFilter === cat ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-600 border-gray-200 hover:border-blue-400"}`}>
+                            {cat}
+                            <span className="ml-1 text-green-600 font-bold">{catUnsent.length}</span>
+                            {catSent.length > 0 && <span className="ml-1 text-gray-400">({catSent.length} sent)</span>}
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
                 )}
@@ -831,19 +879,30 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
                 {/* Lead list */}
                 <div>
                   <div className="flex items-center justify-between mb-2">
-                    <label className="text-xs font-semibold uppercase tracking-widest text-gray-500">Select Leads ({selectedLeadIds.size} selected)</label>
+                    <label className="text-xs font-semibold uppercase tracking-widest text-gray-500">
+                      Unsent Leads ({selectedLeadIds.size} selected)
+                    </label>
                     <button onClick={selectAll} className="text-xs text-blue-600 hover:text-blue-700 font-medium">
-                      {filteredLeads.every((l) => selectedLeadIds.has(l.id)) ? "Deselect all" : "Select all"}
+                      {unsentLeads.every((l) => selectedLeadIds.has(l.id)) ? "Deselect all" : "Select all unsent"}
                     </button>
                   </div>
-                  <div className="border border-gray-200 rounded-xl overflow-hidden max-h-64 overflow-y-auto">
-                    {filteredLeads.length === 0 && (
+                  <div className="border border-gray-200 rounded-xl overflow-hidden max-h-72 overflow-y-auto">
+                    {unsentLeads.length === 0 && alreadySent.length === 0 && (
                       <p className="text-xs text-gray-400 text-center py-6">No leads found</p>
                     )}
-                    {filteredLeads.map((lead, i) => (
+
+                    {/* Unsent leads — selectable */}
+                    {unsentLeads.length === 0 && alreadySent.length > 0 && (
+                      <div className="px-4 py-4 text-center">
+                        <p className="text-sm font-semibold text-green-700">✅ All leads in this niche have been contacted!</p>
+                        <p className="text-xs text-gray-500 mt-1">Add more leads from the Scraper to send more emails.</p>
+                      </div>
+                    )}
+
+                    {unsentLeads.map((lead, i) => (
                       <div key={lead.id}
                         onClick={() => toggleLead(lead.id)}
-                        className={`flex items-center gap-3 px-4 py-3 cursor-pointer transition-colors ${i !== 0 ? "border-t border-gray-100" : ""} ${selectedLeadIds.has(lead.id) ? "bg-blue-50" : "hover:bg-gray-50"}`}>
+                        className={`flex items-center gap-3 px-4 py-3 cursor-pointer transition-colors ${i !== 0 || alreadySent.length > 0 ? "border-t border-gray-100" : ""} ${selectedLeadIds.has(lead.id) ? "bg-blue-50" : "hover:bg-gray-50"}`}>
                         {selectedLeadIds.has(lead.id)
                           ? <CheckSquare size={15} className="text-blue-600 flex-shrink-0" />
                           : <Square size={15} className="text-gray-300 flex-shrink-0" />}
@@ -853,6 +912,28 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
                         </div>
                       </div>
                     ))}
+
+                    {/* Already sent — greyed out, non-selectable, collapsed */}
+                    {alreadySent.length > 0 && (
+                      <div className="border-t-2 border-dashed border-gray-200">
+                        <div className="px-4 py-2 bg-gray-50 flex items-center gap-2">
+                          <CheckCircle size={12} className="text-green-500" />
+                          <span className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide">
+                            Already Sent ({alreadySent.length}) — excluded from selection
+                          </span>
+                        </div>
+                        {alreadySent.map((lead, i) => (
+                          <div key={lead.id}
+                            className="flex items-center gap-3 px-4 py-2.5 border-t border-gray-100 opacity-40 cursor-not-allowed bg-gray-50">
+                            <CheckCircle size={13} className="text-green-500 flex-shrink-0" />
+                            <div className="flex-1 min-w-0">
+                              <p className="text-xs font-medium text-gray-600 truncate line-through">{lead.company_name}</p>
+                              <p className="text-[10px] text-gray-400 truncate">{lead.email} · {lead.status}</p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
 

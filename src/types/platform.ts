@@ -355,9 +355,7 @@ export type ActiveModule =
   | 'ai-settings'
   | 'smtp-manager'
   | 'follow-up'
-  | 'analytics'
-  | 'campaigns'
-  | 'templates';
+  | 'campaigns';
 
 // ─── Tone Types ───────────────────────────────────────────────────────────────
 

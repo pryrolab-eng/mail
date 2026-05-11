@@ -94,9 +94,17 @@ export default function ScraperModule({ userId, onLeadsAdded, onGenerateEmails }
    * - Stores phone, website, source so the CRM has full data
    */
   const addToCRM = async (leadsToAdd: ScrapedLead[]) => {
-    const withEmail = leadsToAdd.filter((l) => l.email && l.email.trim() !== "");
-    if (withEmail.length === 0) {
-      toast.info("None of the selected leads have emails yet.");
+    // Only add leads with REAL scraped emails — never fake generated ones
+    const withRealEmail = leadsToAdd.filter((l) => l.email && l.email.trim() !== "" && (l as any).emailIsReal);
+    const withFakeEmail = leadsToAdd.filter((l) => l.email && !(l as any).emailIsReal);
+    const withNoEmail = leadsToAdd.filter((l) => !l.email);
+
+    if (withRealEmail.length === 0) {
+      if (withFakeEmail.length > 0) {
+        toast.error(`All ${withFakeEmail.length} emails are unverified guesses — they will bounce. Scrape again to find real emails.`);
+      } else {
+        toast.info("None of the selected leads have real emails yet.");
+      }
       return;
     }
 
@@ -111,7 +119,7 @@ export default function ScraperModule({ userId, onLeadsAdded, onGenerateEmails }
         .select();
 
       // ── Deduplication: fetch existing emails for this user ────────────
-      const emailsToCheck = withEmail.map((l) => l.email.toLowerCase());
+      const emailsToCheck = withRealEmail.map((l) => l.email.toLowerCase());
       const { data: existing } = await supabase
         .from("leads")
         .select("email")
@@ -122,19 +130,19 @@ export default function ScraperModule({ userId, onLeadsAdded, onGenerateEmails }
         (existing ?? []).map((r: any) => r.email?.toLowerCase())
       );
 
-      const newLeads = withEmail.filter(
+      const newLeads = withRealEmail.filter(
         (l) => !existingEmails.has(l.email.toLowerCase())
       );
-      const duplicateCount = withEmail.length - newLeads.length;
+      const duplicateCount = withRealEmail.length - newLeads.length;
 
       if (newLeads.length === 0) {
         toast.info(
-          `All ${withEmail.length} lead${withEmail.length !== 1 ? "s" : ""} already exist in your CRM.`
+          `All ${withRealEmail.length} lead${withRealEmail.length !== 1 ? "s" : ""} already exist in your CRM.`
         );
         return;
       }
 
-      // Insert only new leads
+      // Insert only new leads with real emails
       const inserts = newLeads.map((l) => ({
         user_id: userId,
         company_name: l.company_name,
@@ -146,17 +154,17 @@ export default function ScraperModule({ userId, onLeadsAdded, onGenerateEmails }
         company_context: l.company_context,
         status: "new",
         source: "scraper",
-        confidence_score: (l as any).emailIsReal ? 90 : 40,
-        email_verified: (l as any).emailIsReal ?? false,
+        confidence_score: 90,
+        email_verified: true,
       }));
 
       const { error } = await supabase.from("leads").insert(inserts);
       if (error) throw new Error(error.message);
 
-      const skippedNoEmail = leadsToAdd.length - withEmail.length;
-      let msg = `${newLeads.length} lead${newLeads.length !== 1 ? "s" : ""} added to CRM`;
+      let msg = `✅ ${newLeads.length} lead${newLeads.length !== 1 ? "s" : ""} with real emails added to CRM`;
       if (duplicateCount > 0) msg += ` · ${duplicateCount} duplicate${duplicateCount !== 1 ? "s" : ""} skipped`;
-      if (skippedNoEmail > 0) msg += ` · ${skippedNoEmail} skipped (no email)`;
+      if (withFakeEmail.length > 0) msg += ` · ${withFakeEmail.length} skipped (unverified email)`;
+      if (withNoEmail.length > 0) msg += ` · ${withNoEmail.length} skipped (no email)`;
       toast.success(msg);
       onLeadsAdded?.();
     } catch (e: any) {
@@ -194,6 +202,7 @@ export default function ScraperModule({ userId, onLeadsAdded, onGenerateEmails }
 
   const selectedLeads = Array.from(selected).map((i) => results[i]).filter(Boolean);
   const realCount = results.filter((l: any) => l.emailIsReal).length;
+  const fakeCount = results.filter((l: any) => l.email && !l.emailIsReal).length;
   const noEmailCount = results.filter((l) => !l.email).length;
 
   return (
@@ -316,7 +325,7 @@ export default function ScraperModule({ userId, onLeadsAdded, onGenerateEmails }
             >
               {addingToCRM
                 ? <><Loader2 size={12} className="animate-spin" />Saving...</>
-                : <><Plus size={12} />Add All to CRM ({results.filter(l => l.email).length})</>
+                : <><Plus size={12} />Add Real Emails to CRM ({realCount})</>
               }
             </button>
           </div>
@@ -400,10 +409,16 @@ export default function ScraperModule({ userId, onLeadsAdded, onGenerateEmails }
                       <td className="px-4 py-3">
                         {lead.email ? (
                           <div className="flex items-center gap-1.5">
-                            <span className="text-xs text-blue-600 font-mono">{lead.email}</span>
-                            {isReal && (
+                            <span className={`text-xs font-mono ${isReal ? "text-blue-600" : "text-red-400 line-through"}`}>
+                              {lead.email}
+                            </span>
+                            {isReal ? (
                               <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-green-100 text-green-700 border border-green-200 font-semibold">
-                                REAL
+                                ✓ REAL
+                              </span>
+                            ) : (
+                              <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-red-100 text-red-600 border border-red-200 font-semibold">
+                                ✗ FAKE
                               </span>
                             )}
                           </div>
@@ -453,7 +468,8 @@ export default function ScraperModule({ userId, onLeadsAdded, onGenerateEmails }
           </div>
           <div className="px-4 py-2 border-t border-gray-100 bg-gray-50 flex items-center justify-between">
             <span className="text-[10px] text-gray-400 font-mono">
-              {results.length} leads · {realCount} real emails
+              {results.length} found · <span className="text-green-600 font-semibold">{realCount} real ✓</span>
+              {fakeCount > 0 && <> · <span className="text-red-500">{fakeCount} fake ✗</span></>}
               {noEmailCount > 0 && <> · <span className="text-orange-400">{noEmailCount} no email</span></>}
             </span>
             {selected.size > 0 && (

@@ -156,16 +156,45 @@ export class SMTPManager {
     } catch (error) {
       console.error(`Error sending email with account ${account.email}:`, error);
       
-      // Mark account as error if it fails
-      const supabase = createServiceClient();
-      await supabase
-        .from('smtp_accounts')
-        .update({ status: 'error' })
-        .eq('id', account.id);
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      
+      // Only mark account as error for authentication/configuration issues
+      // Don't disable for recipient-specific issues (invalid email, mailbox full, etc.)
+      const isAccountIssue = 
+        errorMessage.toLowerCase().includes('authentication') ||
+        errorMessage.toLowerCase().includes('invalid login') ||
+        errorMessage.toLowerCase().includes('invalid credentials') ||
+        errorMessage.toLowerCase().includes('connection refused') ||
+        errorMessage.toLowerCase().includes('econnrefused') ||
+        errorMessage.toLowerCase().includes('smtp server') ||
+        errorMessage.toLowerCase().includes('host not found');
+      
+      if (isAccountIssue) {
+        // This is an SMTP account configuration problem - disable it
+        console.error(`⚠️  SMTP account ${account.email} has configuration issues - marking as error`);
+        const supabase = createServiceClient();
+        await supabase
+          .from('smtp_accounts')
+          .update({ 
+            status: 'error',
+            last_error: errorMessage
+          })
+          .eq('id', account.id);
+      } else {
+        // This is a recipient-specific issue - keep account active
+        console.warn(`⚠️  Email to recipient failed, but SMTP account ${account.email} is still working`);
+        const supabase = createServiceClient();
+        await supabase
+          .from('smtp_accounts')
+          .update({ 
+            last_error: errorMessage
+          })
+          .eq('id', account.id);
+      }
 
       return {
         success: false,
-        error: error instanceof Error ? error.message : 'Unknown error'
+        error: errorMessage
       };
     }
   }

@@ -1,7 +1,7 @@
 "use client";
 
 import { ActiveModule } from "@/types/platform";
-import { Radio, Mail, Settings, Layout, Server, Send, BarChart2, Megaphone, FileText } from "lucide-react";
+import { Radio, Mail, Settings, Layout, Server, Send, Megaphone } from "lucide-react";
 
 interface SidebarProps {
   activeModule: ActiveModule;
@@ -22,8 +22,6 @@ const navGroups = [
     label: "Management",
     items: [
       { id: "crm" as ActiveModule,           label: "CRM",          icon: Layout,       badge: null },
-      { id: "analytics" as ActiveModule,     label: "Analytics",    icon: BarChart2,    badge: null },
-      { id: "templates" as ActiveModule,    label: "Templates",    icon: FileText,     badge: null },
     ],
   },
   {

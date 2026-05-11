@@ -10,9 +10,7 @@ import CRMModule from "./CRMModule";
 import AISettingsModule from "./AISettingsModule";
 import SMTPManager from "./SMTPManager";
 import FollowUpModule from "./FollowUpModule";
-import AnalyticsDashboard from "./AnalyticsDashboard";
 import CampaignsModule from "./CampaignsModule";
-import TemplatesModule from "./TemplatesModule";
 import { createClient } from "../../../supabase/client";
 import { useRouter } from "next/navigation";
 
@@ -138,10 +136,6 @@ export default function PlatformLayout({ userId, userEmail }: PlatformLayoutProp
             />
           </LazyModule>
 
-          <LazyModule active={activeModule === "analytics"}>
-            <AnalyticsDashboard userId={userId} />
-          </LazyModule>
-
           <LazyModule active={activeModule === "ai-settings"}>
             <AISettingsModule userId={userId} />
           </LazyModule>
@@ -156,10 +150,6 @@ export default function PlatformLayout({ userId, userEmail }: PlatformLayoutProp
 
           <LazyModule active={activeModule === "campaigns"}>
             <CampaignsModule userId={userId} />
-          </LazyModule>
-
-          <LazyModule active={activeModule === "templates"}>
-            <TemplatesModule userId={userId} />
           </LazyModule>
         </main>
       </div>

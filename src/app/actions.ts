@@ -678,17 +678,26 @@ export const sendBulkEmailsChunkedAction = async (
               results.failed++;
               chunkResults.failed++;
               
-              await supabase.from('email_queue').insert({
+              // Log invalid email to sent_emails
+              await supabase.from('sent_emails').insert({
                 user_id: userId,
-                campaign_id: campaignId,
-                lead_id: email.lead_id,
-                recipient_email: email.lead_email,
-                recipient_name: email.company_name,
+                campaign_id: campaignId ?? null,
+                lead_id: email.lead_id || null,
+                to_email: email.lead_email,
                 subject: email.subject,
                 body: email.body,
+                sent_at: new Date().toISOString(),
                 status: 'failed',
-                error_message: 'Invalid email - failed DNS verification'
+                bounce_reason: 'Invalid email - failed DNS verification',
               });
+
+              // Mark lead as failed
+              if (email.lead_id) {
+                await supabase.from('leads').update({ 
+                  status: 'failed',
+                  updated_at: new Date().toISOString(),
+                }).eq('id', email.lead_id);
+              }
               
               continue;
             }
@@ -698,22 +707,9 @@ export const sendBulkEmailsChunkedAction = async (
           // Check if we still have capacity
           const currentCapacity = smtpManager.getTotalCapacity();
           if (currentCapacity.remaining === 0) {
-            // Queue remaining emails for tomorrow
-            await supabase.from('email_queue').insert({
-              user_id: userId,
-              campaign_id: campaignId,
-              lead_id: email.lead_id,
-              recipient_email: email.lead_email,
-              recipient_name: email.company_name,
-              subject: email.subject,
-              body: email.body,
-              status: 'pending',
-              scheduled_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
-            });
-            
             results.queued++;
             chunkResults.queued++;
-            continue;
+            continue; // Skip — no capacity, don't log as failed
           }
           
           // Send email using SMTP manager (auto-rotates across 60 accounts)
@@ -739,44 +735,59 @@ export const sendBulkEmailsChunkedAction = async (
               smtpAccountId = smtpAccount?.id ?? null;
             }
             
-            // Log successful send
-            await supabase.from('email_queue').insert({
+            // Log to sent_emails (the real tracking table)
+            await supabase.from('sent_emails').insert({
               user_id: userId,
-              campaign_id: campaignId,
-              lead_id: email.lead_id,
-              smtp_account_id: smtpAccountId,
-              recipient_email: email.lead_email,
-              recipient_name: email.company_name,
+              campaign_id: campaignId ?? null,
+              lead_id: email.lead_id || null,
+              to_email: email.lead_email,
               subject: email.subject,
               body: email.body,
+              sent_at: new Date().toISOString(),
               status: 'sent',
-              sent_at: new Date().toISOString()
+              smtp_account_id: smtpAccountId,
             });
             
-            // Update lead status
-            await supabase
-              .from('leads')
-              .update({ status: 'Email Sent' })
-              .eq('id', email.lead_id);
+            // Update lead status to 'contacted' (matches kanban column)
+            if (email.lead_id) {
+              await supabase
+                .from('leads')
+                .update({ 
+                  status: 'contacted',
+                  last_contacted_at: new Date().toISOString(),
+                  updated_at: new Date().toISOString(),
+                })
+                .eq('id', email.lead_id);
+            }
             
           } else {
             results.failed++;
             chunkResults.failed++;
             results.errors.push(`${email.lead_email}: ${result.error}`);
             
-            // Queue for retry
-            await supabase.from('email_queue').insert({
+            // Log failure to sent_emails
+            await supabase.from('sent_emails').insert({
               user_id: userId,
-              campaign_id: campaignId,
-              lead_id: email.lead_id,
-              recipient_email: email.lead_email,
-              recipient_name: email.company_name,
+              campaign_id: campaignId ?? null,
+              lead_id: email.lead_id || null,
+              to_email: email.lead_email,
               subject: email.subject,
               body: email.body,
+              sent_at: new Date().toISOString(),
               status: 'failed',
-              error_message: result.error,
-              retry_count: 0
+              bounce_reason: result.error ?? null,
             });
+
+            // Update lead status to 'failed'
+            if (email.lead_id) {
+              await supabase
+                .from('leads')
+                .update({ 
+                  status: 'failed',
+                  updated_at: new Date().toISOString(),
+                })
+                .eq('id', email.lead_id);
+            }
           }
           
           // Delay between emails to avoid spam filters

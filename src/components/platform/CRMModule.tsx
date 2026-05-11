@@ -46,6 +46,10 @@ export default function CRMModule({ userId, onWriteEmail }: CRMModuleProps) {
   const [loading, setLoading] = useState(true);
   const [drawerLead, setDrawerLead] = useState<LeadWithEmails | null>(null);
   const [drawerEmails, setDrawerEmails] = useState<LeadWithEmails["generated_emails"]>([]);
+  const [drawerSentEmails, setDrawerSentEmails] = useState<Array<{
+    id: string; subject: string | null; to_email: string | null;
+    status: string; sent_at: string; bounce_reason: string | null;
+  }>>([]);
   const [notes, setNotes] = useState("");
   const [savingNotes, setSavingNotes] = useState(false);
   const [filterStatus, setFilterStatus] = useState<LeadStatus | "all">("all");
@@ -127,6 +131,13 @@ export default function CRMModule({ userId, onWriteEmail }: CRMModuleProps) {
       .eq("lead_id", lead.id)
       .order("created_at", { ascending: false });
     setDrawerEmails(data || []);
+    // Fetch sent emails for this lead
+    const { data: sentData } = await supabase
+      .from("sent_emails")
+      .select("id, subject, to_email, status, sent_at, bounce_reason")
+      .eq("lead_id", lead.id)
+      .order("sent_at", { ascending: false });
+    setDrawerSentEmails(sentData || []);
   };
 
   const saveNotes = async () => {
@@ -195,6 +206,7 @@ export default function CRMModule({ userId, onWriteEmail }: CRMModuleProps) {
     contacted: leads.filter((l) => l.status === "contacted" || l.status === "Email Sent").length,
     replied: leads.filter((l) => l.status === "replied" || l.status === "Replied").length,
     interested: leads.filter((l) => l.status === "interested" || l.status === "Interested").length,
+    failed: leads.filter((l) => l.status === "failed" || l.status === "bounced").length,
   };
 
   if (loading) {
@@ -209,12 +221,13 @@ export default function CRMModule({ userId, onWriteEmail }: CRMModuleProps) {
     <div className="flex flex-col h-full">
       {/* Stats Strip */}
       <div className="px-4 sm:px-6 pt-4 sm:pt-5 pb-3 sm:pb-4 bg-gray-50 border-b border-gray-200">
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3">
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 sm:gap-3">
           {[
             { label: "Total Leads", value: stats.total, icon: Users, color: "#2563EB" },
             { label: "Contacted", value: stats.contacted, icon: Send, color: "#F59E0B" },
             { label: "Replied", value: stats.replied, icon: MessageSquare, color: "#8B5CF6" },
             { label: "Interested", value: stats.interested, icon: TrendingUp, color: "#10B981" },
+            { label: "Failed", value: stats.failed, icon: X, color: "#EF4444" },
           ].map((stat) => {
             const Icon = stat.icon;
             return (
@@ -556,6 +569,49 @@ export default function CRMModule({ userId, onWriteEmail }: CRMModuleProps) {
                 </div>
               )}
 
+              {/* Sent email history */}
+              <div>
+                <p className="text-[10px] uppercase tracking-widest mb-2 text-gray-500 font-semibold">
+                  Email History ({drawerSentEmails.length})
+                </p>
+                {drawerSentEmails.length === 0 ? (
+                  <p className="text-xs text-gray-400 italic">No emails sent to this lead yet.</p>
+                ) : (
+                  <div className="flex flex-col gap-2">
+                    {drawerSentEmails.map((se) => (
+                      <div
+                        key={se.id}
+                        className={`p-3 rounded-lg border text-xs ${
+                          se.status === "sent" || se.status === "opened" || se.status === "clicked" || se.status === "replied"
+                            ? "bg-green-50 border-green-200"
+                            : "bg-red-50 border-red-200"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2 mb-1">
+                          <p className="font-medium text-gray-900 truncate">{se.subject || "(no subject)"}</p>
+                          <span className={`text-[9px] px-2 py-0.5 rounded-full font-semibold flex-shrink-0 ${
+                            se.status === "sent" ? "bg-green-100 text-green-700" :
+                            se.status === "opened" ? "bg-blue-100 text-blue-700" :
+                            se.status === "replied" ? "bg-purple-100 text-purple-700" :
+                            "bg-red-100 text-red-700"
+                          }`}>
+                            {se.status.toUpperCase()}
+                          </span>
+                        </div>
+                        <p className="text-[10px] text-gray-500">
+                          {new Date(se.sent_at).toLocaleString()}
+                        </p>
+                        {se.bounce_reason && (
+                          <p className="text-[10px] text-red-600 mt-1 truncate">
+                            ⚠️ {se.bounce_reason}
+                          </p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
               {/* Notes */}
               <div>
                 <p className="text-[10px] uppercase tracking-widest mb-2 text-gray-500 font-semibold">
@@ -637,20 +693,41 @@ function LeadCard({
   onDragStart: (e: React.DragEvent, leadId: string) => void;
   onDragEnd: () => void;
 }) {
+  const isFailed = lead.status === "failed" || lead.status === "bounced";
+  const isContacted = lead.status === "contacted" || lead.status === "Email Sent";
+  const isReplied = lead.status === "replied" || lead.status === "Replied";
+
   return (
     <div
       draggable
       onDragStart={(e) => onDragStart(e, lead.id)}
       onDragEnd={onDragEnd}
-      className="rounded-xl p-3 cursor-grab active:cursor-grabbing transition-all group bg-white border border-gray-200 hover:border-blue-400 hover:-translate-y-px"
+      className={`rounded-xl p-3 cursor-grab active:cursor-grabbing transition-all group border hover:-translate-y-px ${
+        isFailed
+          ? "bg-red-50 border-red-200 hover:border-red-400"
+          : isContacted
+          ? "bg-green-50 border-green-200 hover:border-green-400"
+          : "bg-white border-gray-200 hover:border-blue-400"
+      }`}
       style={{
         opacity: isDragging ? 0.5 : 1,
         transform: isDragging ? "rotate(1deg)" : undefined,
       }}
     >
-      <p className="text-xs font-semibold leading-tight text-gray-900 truncate">
-        {lead.company_name}
-      </p>
+      <div className="flex items-start justify-between gap-1">
+        <p className="text-xs font-semibold leading-tight text-gray-900 truncate flex-1">
+          {lead.company_name}
+        </p>
+        {isFailed && (
+          <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-red-100 text-red-600 font-bold flex-shrink-0">✗ FAIL</span>
+        )}
+        {isContacted && !isFailed && (
+          <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-green-100 text-green-700 font-bold flex-shrink-0">✓ SENT</span>
+        )}
+        {isReplied && (
+          <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-700 font-bold flex-shrink-0">↩ REPLY</span>
+        )}
+      </div>
       {lead.email && (
         <p className="text-[10px] mt-1 truncate text-blue-600">{lead.email}</p>
       )}
@@ -658,9 +735,9 @@ function LeadCard({
         <span
           className="text-[9px] px-2 py-0.5 rounded-full font-medium border"
           style={{
-            background: STATUS_BG[lead.status],
-            color: STATUS_COLORS[lead.status],
-            borderColor: `${STATUS_COLORS[lead.status]}33`,
+            background: STATUS_BG[lead.status] ?? "#F3F4F6",
+            color: STATUS_COLORS[lead.status] ?? "#6B7280",
+            borderColor: `${STATUS_COLORS[lead.status] ?? "#D1D5DB"}33`,
           }}
         >
           {lead.status}
