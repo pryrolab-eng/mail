@@ -25,6 +25,9 @@ import { createClient } from "../../../../../supabase/server";
 import { createServiceClient } from "../../../../../supabase/service";
 import { SMTPManager } from "@/utils/smtp-server";
 
+// nodemailer requires the Node.js runtime (not Edge)
+export const runtime = "nodejs";
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface DueFollowup {

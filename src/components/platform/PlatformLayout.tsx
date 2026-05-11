@@ -10,8 +10,15 @@ import CRMModule from "./CRMModule";
 import AISettingsModule from "./AISettingsModule";
 import SMTPManager from "./SMTPManager";
 import FollowUpModule from "./FollowUpModule";
+import CampaignsModule from "./CampaignsModule";
 import { createClient } from "../../../supabase/client";
 import { useRouter } from "next/navigation";
+
+// Lazy-loaded modules (only rendered when active)
+function LazyModule({ active, children }: { active: boolean; children: React.ReactNode }) {
+  if (!active) return null;
+  return <>{children}</>;
+}
 
 interface PlatformLayoutProps {
   userId: string;
@@ -42,8 +49,11 @@ export default function PlatformLayout({ userId, userEmail }: PlatformLayoutProp
         niche: lead.niche,
         location: lead.location,
         company_context: lead.company_context,
-        status: "New",
+        status: "new",
         notes: null,
+        category: null,
+        source: "scraper",
+        tags: null,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       });
@@ -63,6 +73,10 @@ export default function PlatformLayout({ userId, userEmail }: PlatformLayoutProp
   const handleModuleChange = (module: ActiveModule) => {
     setActiveModule(module);
     setSidebarOpen(false);
+    // Clear preloaded lead when switching away from email writer
+    if (module !== "email-writer") {
+      setPreloadedLead(null);
+    }
   };
 
   return (
@@ -90,41 +104,53 @@ export default function PlatformLayout({ userId, userEmail }: PlatformLayoutProp
         <TopBar
           activeModule={activeModule}
           userEmail={userEmail}
+          userId={userId}
           onLogout={handleLogout}
           onMenuToggle={() => setSidebarOpen(!sidebarOpen)}
         />
 
         <main className="flex-1 overflow-y-auto bg-white">
-          {activeModule === "scraper" && (
+          {/* Always-mounted modules (keep state) */}
+          <div className={activeModule === "scraper" ? "block h-full" : "hidden"}>
             <ScraperModule
               userId={userId}
               onLeadsAdded={handleLeadsAdded}
               onGenerateEmails={handleGenerateEmailFromScraper}
             />
-          )}
-          {activeModule === "email-writer" && (
-            <EmailWriterModule
-              key={preloadedLead?.id}
-              userId={userId}
-              preloadedLead={preloadedLead}
-            />
-          )}
-          {activeModule === "crm" && (
+          </div>
+
+          <div className={activeModule === "crm" ? "block h-full" : "hidden"}>
             <CRMModule
               key={crmRefreshKey}
               userId={userId}
               onWriteEmail={handleWriteEmailFromCRM}
             />
-          )}
-          {activeModule === "ai-settings" && (
+          </div>
+
+          {/* Lazy-mounted modules */}
+          <LazyModule active={activeModule === "email-writer"}>
+            <EmailWriterModule
+              key={preloadedLead?.id || "email-writer"}
+              userId={userId}
+              preloadedLead={preloadedLead}
+            />
+          </LazyModule>
+
+          <LazyModule active={activeModule === "ai-settings"}>
             <AISettingsModule userId={userId} />
-          )}
-          {activeModule === "smtp-manager" && (
+          </LazyModule>
+
+          <LazyModule active={activeModule === "smtp-manager"}>
             <SMTPManager userId={userId} />
-          )}
-          {activeModule === "follow-up" && (
+          </LazyModule>
+
+          <LazyModule active={activeModule === "follow-up"}>
             <FollowUpModule userId={userId} />
-          )}
+          </LazyModule>
+
+          <LazyModule active={activeModule === "campaigns"}>
+            <CampaignsModule userId={userId} />
+          </LazyModule>
         </main>
       </div>
     </div>

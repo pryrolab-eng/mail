@@ -1,0 +1,33 @@
+{
+  "name": "high-speed-email-scraper",
+  "version": "1.0.0",
+  "description": "Production-grade high-speed email scraper for thousands of websites",
+  "main": "index.ts",
+  "scripts": {
+    "test": "ts-node examples/test-scraper.ts",
+    "example": "ts-node examples/basic-usage.ts"
+  },
+  "keywords": [
+    "email",
+    "scraper",
+    "web-scraping",
+    "email-extraction",
+    "puppeteer",
+    "cheerio",
+    "axios",
+    "typescript"
+  ],
+  "dependencies": {
+    "axios": "^1.6.0",
+    "cheerio": "^1.0.0-rc.12",
+    "puppeteer": "^21.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0",
+    "ts-node": "^10.9.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

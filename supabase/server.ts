@@ -16,9 +16,14 @@ export const createClient = async () => {
           }));
         },
         setAll(cookiesToSet) {
-          cookiesToSet.forEach(({ name, value, options }) => {
-            cookieStore.set(name, value, options);
-          });
+          try {
+            cookiesToSet.forEach(({ name, value, options }) => {
+              cookieStore.set(name, value, options);
+            });
+          } catch (error) {
+            // Cookies can only be set in Server Actions or Route Handlers
+            // This is expected in some contexts, so we silently ignore
+          }
         },
       },
     }

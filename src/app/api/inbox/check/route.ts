@@ -25,6 +25,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "../../../../../supabase/server";
 import { createServiceClient } from "../../../../../supabase/service";
 
+// imapflow requires the Node.js runtime (not Edge)
+export const runtime = "nodejs";
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface InboxConfig {
