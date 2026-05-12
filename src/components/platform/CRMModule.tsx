@@ -3,19 +3,8 @@
 import { useState, useEffect, useCallback } from "react";
 import { Lead, LeadStatus, LEAD_STATUSES } from "@/types/platform";
 import {
-  Filter,
-  Mail,
-  X,
-  ChevronRight,
-  Loader2,
-  Users,
-  Send,
-  MessageSquare,
-  TrendingUp,
-  Save,
-  Clock,
-  Upload,
-  Trash2,
+  Mail, X, Loader2, Users, Send, MessageSquare,
+  TrendingUp, Save, Clock, Upload, Trash2, Filter,
 } from "lucide-react";
 import { createClient } from "../../../supabase/client";
 import { toast } from "sonner";
@@ -26,16 +15,14 @@ interface CRMModuleProps {
   onWriteEmail?: (lead: Lead) => void;
 }
 
-// Use the unified LEAD_STATUSES from types
-const STATUSES = LEAD_STATUSES;
-
-const STATUS_COLORS: Record<string, string> = Object.fromEntries(
-  LEAD_STATUSES.map(s => [s.value, s.color])
-);
-
-const STATUS_BG: Record<string, string> = Object.fromEntries(
-  LEAD_STATUSES.map(s => [s.value, s.bg])
-);
+// Simplified kanban columns — only the ones that matter
+const KANBAN_COLUMNS: { value: LeadStatus; label: string }[] = [
+  { value: "new",        label: "New" },
+  { value: "contacted",  label: "Contacted" },
+  { value: "replied",    label: "Replied" },
+  { value: "interested", label: "Interested" },
+  { value: "failed",     label: "Failed" },
+];
 
 interface LeadWithEmails extends Lead {
   generated_emails?: Array<{ id: string; subject: string; body: string; model_used: string; created_at: string; tone: string }>;
@@ -53,7 +40,7 @@ export default function CRMModule({ userId, onWriteEmail }: CRMModuleProps) {
   const [notes, setNotes] = useState("");
   const [savingNotes, setSavingNotes] = useState(false);
   const [filterStatus, setFilterStatus] = useState<LeadStatus | "all">("all");
-  const [filterCategory, setFilterCategory] = useState<string | "all">("all");
+  const [filterCategory, setFilterCategory] = useState<string>("all");
   const [categories, setCategories] = useState<string[]>([]);
   const [dragOver, setDragOver] = useState<LeadStatus | null>(null);
   const [draggingLead, setDraggingLead] = useState<string | null>(null);
@@ -67,25 +54,14 @@ export default function CRMModule({ userId, onWriteEmail }: CRMModuleProps) {
       .select("*")
       .eq("user_id", userId)
       .order("created_at", { ascending: false });
-    
-    if (error) {
-      console.error('Error fetching leads:', error);
-    }
-    
+
+    if (error) console.error("Error fetching leads:", error);
+
     if (data) {
       setLeads(data as Lead[]);
-      
-      // Extract unique categories from niche field (fallback since category column has schema issues)
-      const uniqueCategories = Array.from(new Set(
-        data
-          .map((l: any) => l.niche)
-          .filter(Boolean)
-      )) as string[];
-      
-      console.log('📊 Categories found (from niche):', uniqueCategories);
-      console.log('📊 Total leads:', data.length);
-      console.log('📊 Sample lead:', data[0]);
-      
+      const uniqueCategories = Array.from(
+        new Set(data.map((l: any) => l.niche).filter(Boolean))
+      ) as string[];
       setCategories(uniqueCategories);
     }
     setLoading(false);
@@ -93,15 +69,10 @@ export default function CRMModule({ userId, onWriteEmail }: CRMModuleProps) {
 
   useEffect(() => {
     fetchLeads();
-
-    // Real-time subscription
     const channel = supabase
       .channel("leads_changes")
-      .on("postgres_changes", { event: "*", schema: "public", table: "leads", filter: `user_id=eq.${userId}` }, () => {
-        fetchLeads();
-      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "leads", filter: `user_id=eq.${userId}` }, () => fetchLeads())
       .subscribe();
-
     return () => { supabase.removeChannel(channel); };
   }, [fetchLeads]);
 
@@ -111,12 +82,7 @@ export default function CRMModule({ userId, onWriteEmail }: CRMModuleProps) {
       .update({ status: newStatus, updated_at: new Date().toISOString() })
       .eq("id", leadId);
     if (!error) {
-      // Log status history
-      await supabase.from("lead_status_history").insert({
-        lead_id: leadId,
-        old_status: oldStatus,
-        new_status: newStatus,
-      });
+      await supabase.from("lead_status_history").insert({ lead_id: leadId, old_status: oldStatus, new_status: newStatus });
       setLeads((prev) => prev.map((l) => l.id === leadId ? { ...l, status: newStatus } : l));
     }
   };
@@ -124,29 +90,19 @@ export default function CRMModule({ userId, onWriteEmail }: CRMModuleProps) {
   const openDrawer = async (lead: Lead) => {
     setDrawerLead(lead as LeadWithEmails);
     setNotes(lead.notes || "");
-    // Fetch generated emails for this lead
     const { data } = await supabase
-      .from("generated_emails")
-      .select("*")
-      .eq("lead_id", lead.id)
-      .order("created_at", { ascending: false });
+      .from("generated_emails").select("*").eq("lead_id", lead.id).order("created_at", { ascending: false });
     setDrawerEmails(data || []);
-    // Fetch sent emails for this lead
     const { data: sentData } = await supabase
-      .from("sent_emails")
-      .select("id, subject, to_email, status, sent_at, bounce_reason")
-      .eq("lead_id", lead.id)
-      .order("sent_at", { ascending: false });
+      .from("sent_emails").select("id, subject, to_email, status, sent_at, bounce_reason")
+      .eq("lead_id", lead.id).order("sent_at", { ascending: false });
     setDrawerSentEmails(sentData || []);
   };
 
   const saveNotes = async () => {
     if (!drawerLead) return;
     setSavingNotes(true);
-    await supabase
-      .from("leads")
-      .update({ notes, updated_at: new Date().toISOString() })
-      .eq("id", drawerLead.id);
+    await supabase.from("leads").update({ notes, updated_at: new Date().toISOString() }).eq("id", drawerLead.id);
     toast.success("Notes saved");
     setSavingNotes(false);
     setLeads((prev) => prev.map((l) => l.id === drawerLead.id ? { ...l, notes } : l));
@@ -163,194 +119,158 @@ export default function CRMModule({ userId, onWriteEmail }: CRMModuleProps) {
     }
   };
 
-  const deleteSelected = async () => {
-    // Used for bulk delete — not wired to UI yet but available
-  };
-
   // Drag & Drop
   const handleDragStart = (e: React.DragEvent, leadId: string) => {
     e.dataTransfer.setData("leadId", leadId);
     setDraggingLead(leadId);
   };
-
-  const handleDragEnd = () => {
-    setDraggingLead(null);
-    setDragOver(null);
-  };
-
+  const handleDragEnd = () => { setDraggingLead(null); setDragOver(null); };
   const handleDrop = async (e: React.DragEvent, status: LeadStatus) => {
     e.preventDefault();
     const leadId = e.dataTransfer.getData("leadId");
     const lead = leads.find((l) => l.id === leadId);
     if (lead && lead.status !== status) {
       await updateLeadStatus(leadId, status, lead.status);
-      toast.success(`Lead moved to ${status}`);
+      toast.success(`Moved to ${status}`);
     }
     setDragOver(null);
     setDraggingLead(null);
   };
+  const handleDragOver = (e: React.DragEvent, status: LeadStatus) => { e.preventDefault(); setDragOver(status); };
 
-  const handleDragOver = (e: React.DragEvent, status: LeadStatus) => {
-    e.preventDefault();
-    setDragOver(status);
+  // Normalize legacy statuses for column matching
+  const normalizeStatus = (status: LeadStatus): LeadStatus => {
+    if (status === "Email Sent") return "contacted";
+    if (status === "Replied") return "replied";
+    if (status === "Interested") return "interested";
+    if (status === "New") return "new";
+    return status;
   };
 
   const filteredLeads = leads.filter((l) => {
-    const statusMatch = filterStatus === "all" || l.status === filterStatus;
+    const statusMatch = filterStatus === "all" || normalizeStatus(l.status) === filterStatus;
     const categoryMatch = filterCategory === "all" || (l as any).niche === filterCategory;
     return statusMatch && categoryMatch;
   });
 
   const stats = {
     total: leads.length,
-    contacted: leads.filter((l) => l.status === "contacted" || l.status === "Email Sent").length,
-    replied: leads.filter((l) => l.status === "replied" || l.status === "Replied").length,
-    interested: leads.filter((l) => l.status === "interested" || l.status === "Interested").length,
-    failed: leads.filter((l) => l.status === "failed" || l.status === "bounced").length,
+    contacted: leads.filter((l) => normalizeStatus(l.status) === "contacted").length,
+    replied: leads.filter((l) => normalizeStatus(l.status) === "replied").length,
+    interested: leads.filter((l) => normalizeStatus(l.status) === "interested").length,
   };
 
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
-        <Loader2 size={24} className="animate-spin text-blue-600" />
+        <Loader2 size={20} className="animate-spin text-blue-600" />
       </div>
     );
   }
 
   return (
-    <div className="flex flex-col h-full">
-      {/* Stats Strip */}
-      <div className="px-4 sm:px-6 pt-4 sm:pt-5 pb-3 sm:pb-4 bg-gray-50 border-b border-gray-200">
-        <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 sm:gap-3">
+    <div className="flex flex-col h-full bg-white">
+
+      {/* ── Top bar: stats + actions ─────────────────────────────────── */}
+      <div className="flex items-center gap-4 px-5 py-3 border-b border-gray-200 flex-wrap">
+        {/* Stats */}
+        <div className="flex items-center gap-5 flex-1 min-w-0">
           {[
-            { label: "Total Leads", value: stats.total, icon: Users, color: "#2563EB" },
-            { label: "Contacted", value: stats.contacted, icon: Send, color: "#F59E0B" },
-            { label: "Replied", value: stats.replied, icon: MessageSquare, color: "#8B5CF6" },
-            { label: "Interested", value: stats.interested, icon: TrendingUp, color: "#10B981" },
-            { label: "Failed", value: stats.failed, icon: X, color: "#EF4444" },
-          ].map((stat) => {
-            const Icon = stat.icon;
-            return (
-              <div
-                key={stat.label}
-                className="rounded-xl p-3 flex items-center justify-between bg-white border border-gray-200"
-              >
-                <div>
-                  <p className="text-[10px] mb-1 text-gray-500 uppercase tracking-wide font-medium">
-                    {stat.label}
-                  </p>
-                  <p className="text-xl sm:text-2xl font-bold" style={{ color: stat.color }}>
-                    {stat.value}
-                  </p>
-                </div>
-                <Icon size={18} style={{ color: stat.color, opacity: 0.35 }} />
+            { label: "Total", value: stats.total, icon: Users },
+            { label: "Contacted", value: stats.contacted, icon: Send },
+            { label: "Replied", value: stats.replied, icon: MessageSquare },
+            { label: "Interested", value: stats.interested, icon: TrendingUp },
+          ].map(({ label, value, icon: Icon }) => (
+            <div key={label} className="flex items-center gap-2">
+              <Icon size={13} className="text-gray-400 flex-shrink-0" />
+              <div>
+                <p className="text-[10px] text-gray-400 leading-none">{label}</p>
+                <p className="text-sm font-bold text-gray-900 leading-tight">{value}</p>
               </div>
-            );
-          })}
+            </div>
+          ))}
         </div>
+
+        {/* Import CSV */}
+        <button
+          onClick={() => setShowCSVImport(true)}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 transition-colors flex-shrink-0"
+        >
+          <Upload size={12} />
+          Import CSV
+        </button>
       </div>
 
-      {/* Filter Bar */}
-      <div className="px-4 sm:px-6 py-3 space-y-2 bg-gray-50 border-b border-gray-200">
-        {/* Status Filter + Import button */}
-        <div className="flex items-center gap-2 flex-wrap">
-          <Filter size={13} className="text-gray-500 flex-shrink-0" />
-          <span className="text-xs text-gray-500 font-medium">Status:</span>
-          <button
-            onClick={() => setFilterStatus("all")}
-            className="px-3 py-1 rounded-full text-[11px] font-medium transition-all border"
-            style={{
-              background: filterStatus === "all" ? "#EFF6FF" : "#fff",
-              borderColor: filterStatus === "all" ? "#2563EB" : "#D1D5DB",
-              color: filterStatus === "all" ? "#2563EB" : "#6B7280",
-            }}
-          >
-            All ({leads.length})
-          </button>
-          {STATUSES.map((s) => {
-            const count = leads.filter((l) => l.status === s.value).length;
-            return (
-              <button
-                key={s.value}
-                onClick={() => setFilterStatus(s.value)}
-                className="px-3 py-1 rounded-full text-[11px] font-medium transition-all border"
-                style={{
-                  background: filterStatus === s.value ? `${s.color}15` : "#fff",
-                  borderColor: filterStatus === s.value ? s.color : "#D1D5DB",
-                  color: filterStatus === s.value ? s.color : "#6B7280",
-                }}
-              >
-                {s.value} ({count})
-              </button>
-            );
-          })}
+      {/* ── Filter bar ───────────────────────────────────────────────── */}
+      <div className="px-5 py-2.5 border-b border-gray-200 flex items-center gap-2 flex-wrap">
+        <Filter size={12} className="text-gray-400 flex-shrink-0" />
 
-          {/* Import CSV button */}
-          <button
-            onClick={() => setShowCSVImport(true)}
-            className="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold border border-blue-300 bg-blue-50 text-blue-700 hover:bg-blue-100 transition-colors flex-shrink-0"
-          >
-            <Upload size={12} />
-            Import CSV
-          </button>
-        </div>
-
-        {/* Category Filter */}
-        {categories.length > 0 && (
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-xs font-semibold text-gray-600 ml-5">📁 Category:</span>
+        {/* Status pills */}
+        <button
+          onClick={() => setFilterStatus("all")}
+          className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors border ${
+            filterStatus === "all"
+              ? "bg-blue-600 text-white border-blue-600"
+              : "bg-white text-gray-600 border-gray-300 hover:border-gray-400"
+          }`}
+        >
+          All ({leads.length})
+        </button>
+        {KANBAN_COLUMNS.map((col) => {
+          const count = leads.filter((l) => normalizeStatus(l.status) === col.value).length;
+          return (
             <button
-              onClick={() => setFilterCategory("all")}
-              className="px-3 py-1.5 rounded-lg text-[11px] font-medium transition-all border-2"
-              style={{
-                background: filterCategory === "all" ? "#2563EB" : "#fff",
-                borderColor: filterCategory === "all" ? "#2563EB" : "#E5E7EB",
-                color: filterCategory === "all" ? "#fff" : "#6B7280",
-              }}
+              key={col.value}
+              onClick={() => setFilterStatus(col.value)}
+              className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors border ${
+                filterStatus === col.value
+                  ? "bg-blue-600 text-white border-blue-600"
+                  : "bg-white text-gray-600 border-gray-300 hover:border-gray-400"
+              }`}
             >
-              All Categories
+              {col.label} ({count})
             </button>
-            {categories.map((cat) => {
-              const count = leads.filter((l: any) => l.niche === cat).length;
-              return (
-                <button
-                  key={cat}
-                  onClick={() => setFilterCategory(cat)}
-                  className="px-3 py-1.5 rounded-lg text-[11px] font-medium transition-all border-2"
-                  style={{
-                    background: filterCategory === cat ? "#2563EB" : "#fff",
-                    borderColor: filterCategory === cat ? "#2563EB" : "#E5E7EB",
-                    color: filterCategory === cat ? "#fff" : "#6B7280",
-                  }}
-                >
-                  {cat} ({count})
-                </button>
-              );
-            })}
-          </div>
+          );
+        })}
+
+        {/* Category filter — only show if there are categories */}
+        {categories.length > 0 && (
+          <>
+            <span className="text-gray-300 mx-1">|</span>
+            <select
+              value={filterCategory}
+              onChange={(e) => setFilterCategory(e.target.value)}
+              className="px-2.5 py-1 rounded-md text-[11px] border border-gray-300 bg-white text-gray-700 outline-none focus:border-blue-500"
+            >
+              <option value="all">All categories</option>
+              {categories.map((cat) => (
+                <option key={cat} value={cat}>{cat}</option>
+              ))}
+            </select>
+          </>
         )}
       </div>
 
-      {/* Kanban Board */}
-      <div className="flex-1 px-4 sm:px-6 py-4 sm:py-6 overflow-hidden bg-gray-50">
+      {/* ── Kanban board ─────────────────────────────────────────────── */}
+      <div className="flex-1 overflow-hidden bg-gray-50">
         <style>{`
-          .kanban-scroll { overflow-x: auto; overflow-y: hidden; height: 100%; padding-bottom: 8px; }
-          .kanban-scroll::-webkit-scrollbar { height: 8px; }
-          .kanban-scroll::-webkit-scrollbar-track { background: #E5E7EB; border-radius: 8px; }
-          .kanban-scroll::-webkit-scrollbar-thumb { background: #9CA3AF; border-radius: 8px; border: 2px solid #E5E7EB; }
-          .kanban-scroll::-webkit-scrollbar-thumb:hover { background: #6B7280; }
+          .crm-scroll { overflow-x: auto; overflow-y: hidden; height: 100%; }
+          .crm-scroll::-webkit-scrollbar { height: 6px; }
+          .crm-scroll::-webkit-scrollbar-track { background: #f3f4f6; }
+          .crm-scroll::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 3px; }
         `}</style>
-        <div className="kanban-scroll h-full">
+        <div className="crm-scroll h-full p-4">
           {leads.length === 0 ? (
-            <div className="flex items-center justify-center h-full min-h-[200px]">
+            <div className="flex items-center justify-center h-full">
               <div className="text-center">
-                <Users size={32} className="mx-auto mb-3 text-gray-300" />
-                <p className="text-sm font-medium text-gray-500">No leads in CRM yet</p>
-                <p className="text-xs mt-1 text-gray-400">Add leads from the Scraper module to get started</p>
+                <Users size={28} className="mx-auto mb-3 text-gray-300" />
+                <p className="text-sm font-medium text-gray-500">No leads yet</p>
+                <p className="text-xs mt-1 text-gray-400">Add leads from the Scraper module</p>
               </div>
             </div>
           ) : filterStatus !== "all" ? (
-            <div className="flex flex-col gap-2 max-w-2xl">
+            /* List view when a status is selected */
+            <div className="flex flex-col gap-2 max-w-xl">
               {filteredLeads.map((lead) => (
                 <LeadCard
                   key={lead.id}
@@ -363,66 +283,41 @@ export default function CRMModule({ userId, onWriteEmail }: CRMModuleProps) {
                   onDragEnd={handleDragEnd}
                 />
               ))}
+              {filteredLeads.length === 0 && (
+                <p className="text-sm text-gray-400 py-8 text-center">No leads in this status</p>
+              )}
             </div>
           ) : (
-            <div className="flex gap-3 sm:gap-4 min-w-max h-full pb-2">
-              {STATUSES.map((status, index) => {
-                const columnLeads = filteredLeads.filter((l) => l.status === status.value);
-                const isOver = dragOver === status.value;
-                const isLastColumn = index === STATUSES.length - 1;
+            /* Kanban view */
+            <div className="flex gap-4 min-w-max h-full">
+              {KANBAN_COLUMNS.map((col) => {
+                const columnLeads = filteredLeads.filter((l) => normalizeStatus(l.status) === col.value);
+                const isOver = dragOver === col.value;
 
                 return (
                   <div
-                    key={status.value}
-                    className="flex flex-col gap-3 flex-shrink-0"
-                    style={{
-                      width: "clamp(200px, 240px, 260px)",
-                      borderRight: isLastColumn ? "none" : "2px dashed #D1D5DB",
-                      paddingRight: isLastColumn ? "0" : "16px",
-                      marginRight: isLastColumn ? "0" : "8px",
-                    }}
-                    onDrop={(e) => handleDrop(e, status.value)}
-                    onDragOver={(e) => handleDragOver(e, status.value)}
+                    key={col.value}
+                    className="flex flex-col w-56 flex-shrink-0"
+                    onDrop={(e) => handleDrop(e, col.value)}
+                    onDragOver={(e) => handleDragOver(e, col.value)}
                     onDragLeave={() => setDragOver(null)}
                   >
                     {/* Column header */}
-                    <div
-                      className="flex items-center gap-2 pb-2"
-                      style={{ borderBottom: `2px solid ${status.color}` }}
-                    >
-                      <div
-                        style={{
-                          background: status.color,
-                          borderRadius: "50%",
-                          width: 6,
-                          height: 6,
-                          boxShadow: `0 0 6px ${status.color}`,
-                          flexShrink: 0,
-                        }}
-                      />
-                      <span
-                        className="text-[11px] font-semibold uppercase tracking-wider truncate"
-                        style={{ color: status.color }}
-                      >
-                        {status.value}
+                    <div className="flex items-center justify-between mb-2 px-1">
+                      <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-700">
+                        {col.label}
                       </span>
-                      <span
-                        className="ml-auto text-[10px] px-1.5 py-0.5 rounded-full flex-shrink-0"
-                        style={{ background: `${status.color}15`, color: status.color }}
-                      >
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-200 text-gray-600 font-medium">
                         {columnLeads.length}
                       </span>
                     </div>
 
                     {/* Drop zone */}
                     <div
-                      className="flex flex-col gap-2 rounded-xl p-2 transition-all overflow-y-auto"
-                      style={{
-                        minHeight: "6rem",
-                        maxHeight: "calc(100vh - 300px)",
-                        background: isOver ? `${status.color}10` : "#F9FAFB",
-                        border: isOver ? `2px dashed ${status.color}` : "2px dashed transparent",
-                      }}
+                      className={`flex flex-col gap-2 flex-1 rounded-lg p-2 transition-all overflow-y-auto ${
+                        isOver ? "bg-blue-50 border-2 border-dashed border-blue-300" : "bg-gray-100 border-2 border-dashed border-transparent"
+                      }`}
+                      style={{ minHeight: "8rem", maxHeight: "calc(100vh - 260px)" }}
                     >
                       {columnLeads.map((lead) => (
                         <LeadCard
@@ -437,18 +332,8 @@ export default function CRMModule({ userId, onWriteEmail }: CRMModuleProps) {
                         />
                       ))}
                       {columnLeads.length === 0 && (
-                        <div
-                          className="flex flex-col items-center justify-center h-32 rounded-lg"
-                          style={{ border: "2px dashed #D1D5DB", background: "#F9FAFB" }}
-                        >
-                          <svg width="32" height="32" viewBox="0 0 40 40" fill="none" className="mb-2 opacity-40">
-                            <circle cx="20" cy="20" r="3" fill="#9CA3AF" />
-                            <circle cx="20" cy="10" r="2" fill="#D1D5DB" />
-                            <circle cx="20" cy="30" r="2" fill="#D1D5DB" />
-                            <circle cx="10" cy="20" r="2" fill="#D1D5DB" />
-                            <circle cx="30" cy="20" r="2" fill="#D1D5DB" />
-                          </svg>
-                          <p className="text-[10px] text-gray-400">Drop cards here</p>
+                        <div className="flex items-center justify-center h-20 rounded-md border border-dashed border-gray-300">
+                          <p className="text-[10px] text-gray-400">Drop here</p>
                         </div>
                       )}
                     </div>
@@ -460,76 +345,64 @@ export default function CRMModule({ userId, onWriteEmail }: CRMModuleProps) {
         </div>
       </div>
 
-      {/* Lead Detail Drawer */}
+      {/* ── Lead detail drawer ───────────────────────────────────────── */}
       {drawerLead && (
         <div className="fixed inset-0 z-50" onClick={() => setDrawerLead(null)}>
-          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" />
+          <div className="absolute inset-0 bg-black/30" />
           <div
-            className="absolute right-0 top-0 bottom-0 w-full sm:max-w-lg flex flex-col overflow-hidden bg-white border-l border-gray-200"
+            className="absolute right-0 top-0 bottom-0 w-full sm:max-w-md flex flex-col overflow-hidden bg-white border-l border-gray-200 shadow-xl"
             onClick={(e) => e.stopPropagation()}
           >
-            {/* Drawer header */}
-            <div className="flex items-center justify-between px-5 sm:px-6 py-4 border-b border-gray-200">
+            {/* Header */}
+            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200">
               <div className="min-w-0 flex-1 pr-4">
-                <h2 className="text-base font-bold text-gray-900 truncate">{drawerLead.company_name}</h2>
+                <h2 className="text-sm font-bold text-gray-900 truncate">{drawerLead.company_name}</h2>
                 <p className="text-xs mt-0.5 text-gray-500 truncate">{drawerLead.email}</p>
               </div>
-              <button
-                onClick={() => setDrawerLead(null)}
-                className="p-1.5 rounded-lg hover:bg-gray-100 transition-colors flex-shrink-0"
-              >
-                <X size={18} className="text-gray-500" />
+              <button onClick={() => setDrawerLead(null)} className="p-1.5 rounded-lg hover:bg-gray-100 flex-shrink-0">
+                <X size={16} className="text-gray-500" />
               </button>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-5 sm:p-6 flex flex-col gap-5">
-              {/* Status + meta */}
+            <div className="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
+
+              {/* Meta */}
               <div className="flex items-center gap-2 flex-wrap">
-                <span
-                  className="text-[10px] px-2.5 py-1 rounded-full font-medium border"
-                  style={{
-                    background: STATUS_BG[drawerLead.status],
-                    color: STATUS_COLORS[drawerLead.status],
-                    borderColor: `${STATUS_COLORS[drawerLead.status]}33`,
-                  }}
-                >
+                <span className="text-[10px] px-2 py-0.5 rounded border border-gray-300 text-gray-700 font-medium">
                   {drawerLead.status}
                 </span>
                 {drawerLead.niche && (
-                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-50 text-blue-600 border border-blue-100">
+                  <span className="text-[10px] px-2 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200">
                     {drawerLead.niche}
                   </span>
                 )}
                 {drawerLead.location && (
-                  <span className="text-xs text-gray-500">📍 {drawerLead.location}</span>
+                  <span className="text-[10px] text-gray-500">📍 {drawerLead.location}</span>
                 )}
-                <span className="text-xs flex items-center gap-1 text-gray-500">
-                  <Clock size={10} />
+                <span className="text-[10px] text-gray-400 flex items-center gap-1 ml-auto">
+                  <Clock size={9} />
                   {new Date(drawerLead.created_at).toLocaleDateString()}
                 </span>
               </div>
 
-              {/* Quick status change */}
+              {/* Status update */}
               <div>
-                <p className="text-[10px] uppercase tracking-widest mb-2 text-gray-500 font-semibold">
-                  Update Status
-                </p>
+                <p className="text-[10px] uppercase tracking-widest mb-2 text-gray-400 font-semibold">Update Status</p>
                 <div className="flex flex-wrap gap-1.5">
-                  {STATUSES.map((s) => (
+                  {KANBAN_COLUMNS.map((col) => (
                     <button
-                      key={s.value}
+                      key={col.value}
                       onClick={() => {
-                        updateLeadStatus(drawerLead.id, s.value, drawerLead.status);
-                        setDrawerLead({ ...drawerLead, status: s.value });
+                        updateLeadStatus(drawerLead.id, col.value, drawerLead.status);
+                        setDrawerLead({ ...drawerLead, status: col.value });
                       }}
-                      className="text-[10px] px-2.5 py-1 rounded-full transition-all border"
-                      style={{
-                        background: drawerLead.status === s.value ? STATUS_BG[s.value] : "#F9FAFB",
-                        borderColor: drawerLead.status === s.value ? s.color : "#E5E7EB",
-                        color: drawerLead.status === s.value ? s.color : "#6B7280",
-                      }}
+                      className={`text-[10px] px-2.5 py-1 rounded border transition-all font-medium ${
+                        normalizeStatus(drawerLead.status) === col.value
+                          ? "bg-blue-600 text-white border-blue-600"
+                          : "bg-white text-gray-600 border-gray-300 hover:border-blue-400"
+                      }`}
                     >
-                      {s.value}
+                      {col.label}
                     </button>
                   ))}
                 </div>
@@ -538,97 +411,56 @@ export default function CRMModule({ userId, onWriteEmail }: CRMModuleProps) {
               {/* Company context */}
               {drawerLead.company_context && (
                 <div>
-                  <p className="text-[10px] uppercase tracking-widest mb-2 text-gray-500 font-semibold">
-                    Company Context
-                  </p>
+                  <p className="text-[10px] uppercase tracking-widest mb-1.5 text-gray-400 font-semibold">About</p>
                   <p className="text-xs leading-relaxed p-3 rounded-lg text-gray-700 bg-gray-50 border border-gray-200">
                     {drawerLead.company_context}
                   </p>
                 </div>
               )}
 
-              {/* Generated emails */}
-              {drawerEmails && drawerEmails.length > 0 && (
+              {/* Email history */}
+              {drawerSentEmails.length > 0 && (
                 <div>
-                  <p className="text-[10px] uppercase tracking-widest mb-2 text-gray-500 font-semibold">
-                    Generated Emails ({drawerEmails.length})
+                  <p className="text-[10px] uppercase tracking-widest mb-1.5 text-gray-400 font-semibold">
+                    Sent Emails ({drawerSentEmails.length})
                   </p>
-                  <div className="flex flex-col gap-2">
-                    {drawerEmails.map((em) => (
-                      <div key={em.id} className="p-3 rounded-lg bg-gray-50 border border-gray-200">
-                        <div className="flex items-center justify-between mb-1 gap-2">
-                          <p className="text-xs font-medium text-gray-900 truncate">{em.subject}</p>
-                          <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-600 flex-shrink-0">
-                            {em.tone}
+                  <div className="flex flex-col gap-1.5">
+                    {drawerSentEmails.map((se) => (
+                      <div key={se.id} className="p-2.5 rounded-lg border border-gray-200 bg-white">
+                        <div className="flex items-center justify-between gap-2 mb-0.5">
+                          <p className="text-xs font-medium text-gray-900 truncate">{se.subject || "(no subject)"}</p>
+                          <span className={`text-[9px] px-1.5 py-0.5 rounded font-semibold flex-shrink-0 ${
+                            se.status === "sent" || se.status === "opened" || se.status === "replied"
+                              ? "bg-blue-50 text-blue-700"
+                              : "bg-red-50 text-red-600"
+                          }`}>
+                            {se.status.toUpperCase()}
                           </span>
                         </div>
-                        <p className="text-[10px] truncate text-gray-500">{em.model_used}</p>
+                        <p className="text-[10px] text-gray-400">{new Date(se.sent_at).toLocaleString()}</p>
+                        {se.bounce_reason && (
+                          <p className="text-[10px] text-red-500 mt-0.5 truncate">⚠ {se.bounce_reason}</p>
+                        )}
                       </div>
                     ))}
                   </div>
                 </div>
               )}
 
-              {/* Sent email history */}
-              <div>
-                <p className="text-[10px] uppercase tracking-widest mb-2 text-gray-500 font-semibold">
-                  Email History ({drawerSentEmails.length})
-                </p>
-                {drawerSentEmails.length === 0 ? (
-                  <p className="text-xs text-gray-400 italic">No emails sent to this lead yet.</p>
-                ) : (
-                  <div className="flex flex-col gap-2">
-                    {drawerSentEmails.map((se) => (
-                      <div
-                        key={se.id}
-                        className={`p-3 rounded-lg border text-xs ${
-                          se.status === "sent" || se.status === "opened" || se.status === "clicked" || se.status === "replied"
-                            ? "bg-green-50 border-green-200"
-                            : "bg-red-50 border-red-200"
-                        }`}
-                      >
-                        <div className="flex items-center justify-between gap-2 mb-1">
-                          <p className="font-medium text-gray-900 truncate">{se.subject || "(no subject)"}</p>
-                          <span className={`text-[9px] px-2 py-0.5 rounded-full font-semibold flex-shrink-0 ${
-                            se.status === "sent" ? "bg-green-100 text-green-700" :
-                            se.status === "opened" ? "bg-blue-100 text-blue-700" :
-                            se.status === "replied" ? "bg-purple-100 text-purple-700" :
-                            "bg-red-100 text-red-700"
-                          }`}>
-                            {se.status.toUpperCase()}
-                          </span>
-                        </div>
-                        <p className="text-[10px] text-gray-500">
-                          {new Date(se.sent_at).toLocaleString()}
-                        </p>
-                        {se.bounce_reason && (
-                          <p className="text-[10px] text-red-600 mt-1 truncate">
-                            ⚠️ {se.bounce_reason}
-                          </p>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
               {/* Notes */}
               <div>
-                <p className="text-[10px] uppercase tracking-widest mb-2 text-gray-500 font-semibold">
-                  Notes
-                </p>
+                <p className="text-[10px] uppercase tracking-widest mb-1.5 text-gray-400 font-semibold">Notes</p>
                 <textarea
                   value={notes}
                   onChange={(e) => setNotes(e.target.value)}
                   rows={4}
                   placeholder="Add notes about this lead..."
-                  className="w-full px-3 py-2.5 rounded-lg text-xs outline-none resize-none bg-gray-50 border border-gray-200 text-gray-700 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 transition-all"
-                  style={{ lineHeight: "1.6" }}
+                  className="w-full px-3 py-2 rounded-lg text-xs outline-none resize-none bg-white border border-gray-300 text-gray-700 focus:border-blue-500 focus:ring-2 focus:ring-blue-100 transition-all"
                 />
                 <button
                   onClick={saveNotes}
                   disabled={savingNotes}
-                  className="mt-2 flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all bg-green-50 border border-green-300 text-green-700 hover:bg-green-100 disabled:opacity-50"
+                  className="mt-1.5 flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"
                 >
                   {savingNotes ? <Loader2 size={11} className="animate-spin" /> : <Save size={11} />}
                   Save Notes
@@ -636,25 +468,22 @@ export default function CRMModule({ userId, onWriteEmail }: CRMModuleProps) {
               </div>
             </div>
 
-            {/* Drawer footer */}
-            <div className="px-5 sm:px-6 py-4 border-t border-gray-200 flex gap-2">
+            {/* Footer */}
+            <div className="px-5 py-3 border-t border-gray-200 flex gap-2">
               <button
                 onClick={() => { onWriteEmail?.(drawerLead); setDrawerLead(null); }}
-                className="flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-semibold bg-blue-50 border border-blue-300 text-blue-700 hover:bg-blue-100 transition-colors"
+                className="flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-semibold bg-blue-600 text-white hover:bg-blue-700 transition-colors"
               >
                 <Mail size={14} />
-                Generate Email
+                Write Email
               </button>
               <button
                 onClick={() => {
-                  if (confirm(`Delete "${drawerLead.company_name}"? This cannot be undone.`)) {
-                    deleteLead(drawerLead.id);
-                  }
+                  if (confirm(`Delete "${drawerLead.company_name}"?`)) deleteLead(drawerLead.id);
                 }}
-                className="flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl text-sm font-semibold bg-red-50 border border-red-200 text-red-600 hover:bg-red-100 transition-colors"
+                className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium border border-gray-300 text-gray-600 hover:bg-gray-50 transition-colors"
               >
                 <Trash2 size={14} />
-                Delete
               </button>
             </div>
           </div>
@@ -666,10 +495,7 @@ export default function CRMModule({ userId, onWriteEmail }: CRMModuleProps) {
         <CSVImportModal
           userId={userId}
           onClose={() => setShowCSVImport(false)}
-          onImported={(count) => {
-            setShowCSVImport(false);
-            fetchLeads();
-          }}
+          onImported={() => { setShowCSVImport(false); fetchLeads(); }}
         />
       )}
     </div>
@@ -694,85 +520,54 @@ function LeadCard({
   onDragEnd: () => void;
 }) {
   const isFailed = lead.status === "failed" || lead.status === "bounced";
-  const isContacted = lead.status === "contacted" || lead.status === "Email Sent";
-  const isReplied = lead.status === "replied" || lead.status === "Replied";
+  const isSent = lead.status === "contacted" || lead.status === "Email Sent";
 
   return (
     <div
       draggable
       onDragStart={(e) => onDragStart(e, lead.id)}
       onDragEnd={onDragEnd}
-      className={`rounded-xl p-3 cursor-grab active:cursor-grabbing transition-all group border hover:-translate-y-px ${
-        isFailed
-          ? "bg-red-50 border-red-200 hover:border-red-400"
-          : isContacted
-          ? "bg-green-50 border-green-200 hover:border-green-400"
-          : "bg-white border-gray-200 hover:border-blue-400"
-      }`}
-      style={{
-        opacity: isDragging ? 0.5 : 1,
-        transform: isDragging ? "rotate(1deg)" : undefined,
-      }}
+      onClick={() => onOpen(lead)}
+      className="rounded-lg p-3 cursor-pointer border border-gray-200 bg-white hover:border-blue-400 hover:shadow-sm transition-all group"
+      style={{ opacity: isDragging ? 0.4 : 1 }}
     >
-      <div className="flex items-start justify-between gap-1">
-        <p className="text-xs font-semibold leading-tight text-gray-900 truncate flex-1">
+      <div className="flex items-start justify-between gap-1 mb-1">
+        <p className="text-xs font-semibold text-gray-900 truncate flex-1 leading-tight">
           {lead.company_name}
         </p>
         {isFailed && (
-          <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-red-100 text-red-600 font-bold flex-shrink-0">✗ FAIL</span>
+          <span className="text-[9px] px-1.5 py-0.5 rounded bg-red-50 text-red-600 border border-red-200 font-semibold flex-shrink-0">FAIL</span>
         )}
-        {isContacted && !isFailed && (
-          <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-green-100 text-green-700 font-bold flex-shrink-0">✓ SENT</span>
-        )}
-        {isReplied && (
-          <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-700 font-bold flex-shrink-0">↩ REPLY</span>
+        {isSent && !isFailed && (
+          <span className="text-[9px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-600 border border-blue-200 font-semibold flex-shrink-0">SENT</span>
         )}
       </div>
+
       {lead.email && (
-        <p className="text-[10px] mt-1 truncate text-blue-600">{lead.email}</p>
+        <p className="text-[10px] text-gray-400 truncate mb-1.5">{lead.email}</p>
       )}
-      <div className="flex items-center gap-1.5 mt-2 flex-wrap">
-        <span
-          className="text-[9px] px-2 py-0.5 rounded-full font-medium border"
-          style={{
-            background: STATUS_BG[lead.status] ?? "#F3F4F6",
-            color: STATUS_COLORS[lead.status] ?? "#6B7280",
-            borderColor: `${STATUS_COLORS[lead.status] ?? "#D1D5DB"}33`,
-          }}
-        >
-          {lead.status}
-        </span>
+
+      <div className="flex items-center gap-1.5 flex-wrap">
         {lead.niche && (
-          <span className="text-[9px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-600">
+          <span className="text-[9px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 border border-gray-200">
             {lead.niche}
           </span>
         )}
       </div>
 
-      {/* Action buttons — visible on hover */}
+      {/* Hover actions */}
       <div className="flex items-center gap-1 mt-2 opacity-0 group-hover:opacity-100 transition-opacity">
         <button
-          onClick={(e) => { e.stopPropagation(); onOpen(lead); }}
-          className="text-[9px] px-1.5 py-0.5 rounded flex items-center gap-0.5 bg-gray-100 text-gray-600 hover:bg-gray-200 transition-colors"
-        >
-          <ChevronRight size={9} />
-          View
-        </button>
-        <button
           onClick={(e) => { e.stopPropagation(); onWriteEmail?.(lead); }}
-          className="text-[9px] px-1.5 py-0.5 rounded flex items-center gap-0.5 bg-blue-50 text-blue-600 hover:bg-blue-100 transition-colors"
+          className="flex items-center gap-1 px-2 py-1 rounded text-[10px] font-medium bg-blue-600 text-white hover:bg-blue-700"
         >
-          <Mail size={9} />
-          Email
+          <Mail size={9} />Email
         </button>
         <button
-          onClick={(e) => {
-            e.stopPropagation();
-            if (confirm(`Delete "${lead.company_name}"?`)) onDelete(lead.id);
-          }}
-          className="text-[9px] px-1.5 py-0.5 rounded flex items-center gap-0.5 bg-red-50 text-red-500 hover:bg-red-100 transition-colors ml-auto"
+          onClick={(e) => { e.stopPropagation(); if (confirm(`Delete "${lead.company_name}"?`)) onDelete(lead.id); }}
+          className="p-1 rounded text-gray-400 hover:text-red-500 hover:bg-red-50"
         >
-          <Trash2 size={9} />
+          <Trash2 size={11} />
         </button>
       </div>
     </div>

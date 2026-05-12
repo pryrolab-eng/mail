@@ -89,97 +89,52 @@
 
 /* Platform-specific styles */
 .platform-bg {
-  background-color: #0D0F14;
-  background-image: 
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'%3E%3Crect width='40' height='40' fill='none'/%3E%3Cpath d='M0 40L40 0M-10 10L10-10M30 50L50 30' stroke='%231A1D24' stroke-width='0.5'/%3E%3C/svg%3E"),
-    radial-gradient(ellipse at 20% 50%, rgba(0, 212, 255, 0.03) 0%, transparent 60%);
+  background-color: #ffffff;
 }
 
 .glass-card {
-  background: rgba(22, 25, 32, 0.8);
-  border: 1px solid rgba(42, 45, 53, 0.8);
-  backdrop-filter: blur(12px);
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
 }
 
 .glass-card:hover {
-  border-color: rgba(0, 212, 255, 0.2);
-  box-shadow: 0 0 20px rgba(0, 212, 255, 0.05);
+  border-color: #2563eb33;
 }
 
-.glow-cyan {
-  box-shadow: 0 0 20px rgba(0, 212, 255, 0.3), 0 0 60px rgba(0, 212, 255, 0.1);
-}
-
-.glow-green {
-  box-shadow: 0 0 10px rgba(0, 232, 122, 0.4), 0 0 30px rgba(0, 232, 122, 0.15);
-}
-
-.glow-rose {
-  box-shadow: 0 0 10px rgba(255, 77, 109, 0.4), 0 0 30px rgba(255, 77, 109, 0.15);
-}
-
-.glow-amber {
-  box-shadow: 0 0 10px rgba(245, 166, 35, 0.4), 0 0 30px rgba(245, 166, 35, 0.15);
-}
-
+/* Status dots — minimalistic, no glow */
 .status-dot-green {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #00E87A;
-  box-shadow: 0 0 6px #00E87A, 0 0 12px rgba(0, 232, 122, 0.5);
+  background: #16a34a;
 }
 
 .status-dot-cyan {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #00D4FF;
-  box-shadow: 0 0 6px #00D4FF, 0 0 12px rgba(0, 212, 255, 0.5);
+  background: #2563eb;
 }
 
 .status-dot-amber {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #F5A623;
-  box-shadow: 0 0 6px #F5A623, 0 0 12px rgba(245, 166, 35, 0.5);
+  background: #d97706;
 }
 
 .status-dot-rose {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #FF4D6D;
-  box-shadow: 0 0 6px #FF4D6D, 0 0 12px rgba(255, 77, 109, 0.5);
+  background: #dc2626;
 }
 
 .status-dot-gray {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #555;
-}
-
-.font-syne {
-  font-family: 'Syne', sans-serif;
-}
-
-.font-mono-jet {
-  font-family: 'JetBrains Mono', monospace;
-}
-
-.font-space {
-  font-family: 'Space Grotesk', sans-serif;
-}
-
-@keyframes pulse-glow {
-  0%, 100% { box-shadow: 0 0 10px rgba(0, 212, 255, 0.3); }
-  50% { box-shadow: 0 0 25px rgba(0, 212, 255, 0.7), 0 0 50px rgba(0, 212, 255, 0.3); }
-}
-
-.pulse-active {
-  animation: pulse-glow 2s ease-in-out infinite;
+  background: #9ca3af;
 }
 
 @keyframes spin-slow {
@@ -191,25 +146,20 @@
   animation: spin-slow 3s linear infinite;
 }
 
-.sidebar-active-border {
-  border-left: 2px solid #00D4FF;
-  box-shadow: -4px 0 12px rgba(0, 212, 255, 0.2);
-}
-
 /* Scrollbar */
 ::-webkit-scrollbar {
   width: 4px;
   height: 4px;
 }
 ::-webkit-scrollbar-track {
-  background: #0D0F14;
+  background: #f3f4f6;
 }
 ::-webkit-scrollbar-thumb {
-  background: #2A2D35;
+  background: #d1d5db;
   border-radius: 2px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #00D4FF44;
+  background: #2563eb66;
 }
 
 /* Kanban drag styles */

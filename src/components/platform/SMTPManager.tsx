@@ -218,31 +218,31 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
 
       {/* Capacity Overview */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className="bg-gradient-to-br from-blue-50 to-blue-100 rounded-xl p-4 border border-blue-200">
+        <div className="bg-white rounded-xl p-4 border border-gray-200">
           <div className="flex items-center gap-2 mb-2">
             <Mail size={20} className="text-blue-600" />
             <span className="text-sm font-medium text-gray-700">Total Capacity</span>
           </div>
           <p className="text-3xl font-bold text-gray-900">{capacity.total.toLocaleString()}</p>
-          <p className="text-xs text-gray-600 mt-1">emails per day</p>
+          <p className="text-xs text-gray-500 mt-1">emails per day</p>
         </div>
 
-        <div className="bg-gradient-to-br from-green-50 to-green-100 rounded-xl p-4 border border-green-200">
+        <div className="bg-white rounded-xl p-4 border border-gray-200">
           <div className="flex items-center gap-2 mb-2">
-            <CheckCircle size={20} className="text-green-600" />
+            <CheckCircle size={20} className="text-blue-600" />
             <span className="text-sm font-medium text-gray-700">Remaining</span>
           </div>
           <p className="text-3xl font-bold text-gray-900">{capacity.remaining.toLocaleString()}</p>
-          <p className="text-xs text-gray-600 mt-1">emails available today</p>
+          <p className="text-xs text-gray-500 mt-1">emails available today</p>
         </div>
 
-        <div className="bg-gradient-to-br from-purple-50 to-purple-100 rounded-xl p-4 border border-purple-200">
+        <div className="bg-white rounded-xl p-4 border border-gray-200">
           <div className="flex items-center gap-2 mb-2">
-            <Settings size={20} className="text-purple-600" />
+            <Settings size={20} className="text-blue-600" />
             <span className="text-sm font-medium text-gray-700">Active Accounts</span>
           </div>
           <p className="text-3xl font-bold text-gray-900">{accounts.filter(a => a.status === 'active').length}</p>
-          <p className="text-xs text-gray-600 mt-1">of {accounts.length} total</p>
+          <p className="text-xs text-gray-500 mt-1">of {accounts.length} total</p>
         </div>
       </div>
 

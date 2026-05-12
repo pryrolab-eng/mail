@@ -1,20 +1,14 @@
 /**
- * Server-side bulk email generation with built-in rate limit handling.
- *
- * Why server-side?
- * - The browser can't reliably sleep/retry across 60 leads without the tab
- *   freezing or the user navigating away.
- * - The server can read the Retry-After header from Groq and wait exactly
- *   the right amount of time before retrying.
- * - One HTTP round-trip from the browser instead of 60.
+ * Streaming bulk email generation via Server-Sent Events.
+ * Each email is sent to the client as soon as it's ready —
+ * the user sees emails appear one by one instead of waiting for all.
  */
 
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 import { createClient } from "../../../../supabase/server";
 import { createServiceClient } from "../../../../supabase/service";
 
 export const runtime = "nodejs";
-// Allow up to 5 minutes — 60 leads × ~4 s each = ~4 min worst case
 export const maxDuration = 300;
 
 interface LeadInput {
@@ -26,80 +20,40 @@ interface LeadInput {
   email: string | null;
 }
 
-interface GeneratedEmail {
-  lead_id: string;
-  lead_email: string | null;
-  company_name: string;
-  subject: string;
-  body: string;
-  model: string;
-  isFallback: boolean;
+// ─── System message ───────────────────────────────────────────────────────────
+const SYSTEM_MESSAGE = `You are a B2B sales rep for Pryro, a tech company offering AI automation, workflow optimization, custom software, and digital transformation.
+
+Write professional, personalized cold outreach emails that:
+- Hook with a relevant industry pain point
+- Show how Pryro solves it (AI automation, workflow tools, CRM, software dev)
+- Focus on business outcomes (time saved, efficiency, scale)
+- End with a polite CTA for a 15-min discovery call
+- Sound human and consultative, never robotic or salesy
+- 120–180 words max
+
+CRITICAL FORMATTING RULES:
+- Plain text only. No markdown. No asterisks, no bold, no bullet points, no symbols.
+- Write in proper paragraphs separated by blank lines.
+- Never use ** or * or # or - for formatting.
+
+Respond ONLY in this exact format:
+SUBJECT: [subject line, max 70 chars]
+BODY: [email body in plain text paragraphs]`;
+
+const TONE_ADDITIONS: Record<string, string> = {
+  Direct:     `Tone: Direct. No filler. State the problem, solution, result, CTA. Max 130 words.`,
+  Aggressive: `Tone: Urgent. Open with a bold industry pain stat. Create FOMO. Binary CTA: "Quick call this week — yes or no?"`,
+  Surgical:   `Tone: Hyper-personalized. Reference their specific context. Sound like an advisor, not a salesperson.`,
+};
+
+function buildPrompt(lead: LeadInput, yourCompany: string, yourService: string, tone: string, customPainPoint?: string): string {
+  const context = lead.company_context?.slice(0, 300) ?? "";
+  const toneInstruction = TONE_ADDITIONS[tone] ?? TONE_ADDITIONS["Direct"];
+  return `Write a Pryro outreach email.
+Sender: ${yourCompany} — ${yourService}
+Recipient: ${lead.company_name} | ${lead.niche ?? "Business"} | ${lead.location ?? ""}${context ? `\nContext: ${context}` : ""}${customPainPoint ? `\nPain point: ${customPainPoint}` : ""}
+${toneInstruction}`;
 }
-
-// ─── Tone prompts ─────────────────────────────────────────────────────────────
-
-function buildPrompt(
-  lead: LeadInput,
-  yourCompany: string,
-  yourService: string,
-  tone: string,
-  customPainPoint?: string
-): string {
-  const context = lead.company_context?.slice(0, 600) ?? "No additional context available";
-
-  const toneBlock =
-    tone === "Aggressive"
-      ? `Write a high-urgency, pattern-interrupting cold email that creates genuine FOMO.
-- Open with a bold, provocative statement about a costly problem in their industry
-- Quantify the pain: use realistic numbers, percentages, or time wasted
-- Create urgency: limited availability or a window they're about to miss
-- End with a direct binary CTA: "Are you open to a 20-minute call this week — yes or no?"
-- 120–180 words, punchy paragraphs`
-      : tone === "Surgical"
-      ? `Write a hyper-personalized cold email that proves you did your homework.
-- Open by referencing something specific from their company context
-- Connect that detail to a challenge that naturally follows
-- Explain how ${yourService} addresses that exact challenge
-- Close with a consultative CTA that feels like a natural next step
-- 150–220 words`
-      : /* Direct */ `Write a HARD DIRECT cold email. NO politeness. NO fluff.
-STRUCTURE (80-120 words):
-1. SUBJECT: state a specific problem they have
-2. OPENING: state the problem immediately — no greeting, no "I came across"
-3. SOLUTION: one sentence on what ${yourService} does
-4. PROOF: one concrete result or timeframe
-5. CTA: "15-minute call this week?"
-
-BANNED: "I'd love to" / "reaching out" / "I came across" / "Looking forward" / "Would you be available" / "I hope"`;
-
-  return `You are an elite B2B cold email copywriter. Write emails that are DIRECT, PROBLEM-FOCUSED, and get responses.
-
-=== SENDER ===
-Company: ${yourCompany}
-Service: ${yourService}
-
-=== TARGET ===
-Company: ${lead.company_name}
-Niche: ${lead.niche ?? "Unknown"}
-Location: ${lead.location ?? "Unknown"}
-Context: ${context}
-${customPainPoint ? `\n=== PAIN POINT ===\n${customPainPoint}\n` : ""}
-=== INSTRUCTIONS ===
-${toneBlock}
-
-=== RULES ===
-- Subject must state a specific problem
-- NO "Hi", "Hello", "Dear", "I hope", "reaching out", "I came across"
-- Start immediately with the problem
-- End with a direct question
-- NO signature block or name placeholder
-
-Respond EXACTLY in this format (nothing before or after):
-SUBJECT: [subject line, max 60 chars]
-BODY: [email body]`;
-}
-
-// ─── Call AI with retry on 429 ────────────────────────────────────────────────
 
 async function callAI(
   provider: { provider: string; api_key: string; active_model: string | null },
@@ -107,7 +61,6 @@ async function callAI(
   attempt = 0
 ): Promise<string> {
   const MAX_ATTEMPTS = 5;
-
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   let url = "";
   let body: object;
@@ -115,52 +68,24 @@ async function callAI(
   if (provider.provider === "openai") {
     url = "https://api.openai.com/v1/chat/completions";
     headers["Authorization"] = `Bearer ${provider.api_key}`;
-    body = {
-      model: provider.active_model ?? "gpt-4o-mini",
-      messages: [
-        { role: "system", content: "You are a HARD DIRECT B2B cold email copywriter. Follow the exact output format: SUBJECT: ... BODY: ..." },
-        { role: "user", content: prompt },
-      ],
-      temperature: 0.75,
-      max_tokens: 900,
-    };
+    body = { model: provider.active_model ?? "gpt-4o-mini", messages: [{ role: "system", content: SYSTEM_MESSAGE }, { role: "user", content: prompt }], temperature: 0.4, max_tokens: 400 };
   } else if (provider.provider === "anthropic") {
     url = "https://api.anthropic.com/v1/messages";
     headers["x-api-key"] = provider.api_key;
     headers["anthropic-version"] = "2023-06-01";
-    body = {
-      model: provider.active_model ?? "claude-3-5-sonnet-20241022",
-      max_tokens: 900,
-      system: "You are a HARD DIRECT B2B cold email copywriter. Follow the exact output format: SUBJECT: ... BODY: ...",
-      messages: [{ role: "user", content: prompt }],
-    };
+    body = { model: provider.active_model ?? "claude-3-5-haiku-20241022", max_tokens: 400, system: SYSTEM_MESSAGE, messages: [{ role: "user", content: prompt }] };
   } else {
-    // Groq (default)
     url = "https://api.groq.com/openai/v1/chat/completions";
     headers["Authorization"] = `Bearer ${provider.api_key}`;
-    body = {
-      model: provider.active_model ?? "llama-3.3-70b-versatile",
-      messages: [
-        { role: "system", content: "You are a HARD DIRECT B2B cold email copywriter. Follow the exact output format: SUBJECT: ... BODY: ..." },
-        { role: "user", content: prompt },
-      ],
-      temperature: 0.75,
-      max_tokens: 900,
-    };
+    body = { model: provider.active_model ?? "llama-3.1-8b-instant", messages: [{ role: "system", content: SYSTEM_MESSAGE }, { role: "user", content: prompt }], temperature: 0.4, max_tokens: 400 };
   }
 
   const res = await fetch(url, { method: "POST", headers, body: JSON.stringify(body) });
 
   if (res.status === 429) {
     if (attempt >= MAX_ATTEMPTS) throw new Error("rate_limit_exhausted");
-
-    // Read Retry-After header; fall back to exponential back-off
     const retryAfter = res.headers.get("retry-after");
-    const waitMs = retryAfter
-      ? parseInt(retryAfter, 10) * 1000 + 500
-      : Math.min(2000 * 2 ** attempt, 30000); // 2s, 4s, 8s, 16s, 30s
-
-    console.log(`[generate-emails-bulk] 429 — waiting ${waitMs}ms before retry ${attempt + 1}/${MAX_ATTEMPTS}`);
+    const waitMs = retryAfter ? parseInt(retryAfter, 10) * 1000 + 500 : Math.min(2000 * 2 ** attempt, 30000);
     await new Promise((r) => setTimeout(r, waitMs));
     return callAI(provider, prompt, attempt + 1);
   }
@@ -171,143 +96,156 @@ async function callAI(
   }
 
   const data = await res.json();
-
   if (provider.provider === "anthropic") return data.content[0].text as string;
   return data.choices[0].message.content as string;
 }
 
-// ─── Parse AI response ────────────────────────────────────────────────────────
+function stripMarkdown(text: string): string {
+  return text
+    .replace(/\*\*(.+?)\*\*/g, "$1")
+    .replace(/\*(.+?)\*/g, "$1")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^[-*+]\s+/gm, "")
+    .replace(/`(.+?)`/g, "$1")
+    .replace(/_{1,2}(.+?)_{1,2}/g, "$1")
+    .trim();
+}
 
 function parseResponse(raw: string): { subject: string; body: string } {
   const subjectMatch = raw.match(/SUBJECT:\s*(.+?)(?:\n|$)/i);
   const bodyMatch = raw.match(/BODY:\s*([\s\S]+?)$/i);
-
   if (subjectMatch && bodyMatch) {
     return {
-      subject: subjectMatch[1].replace(/^["']|["']$/g, "").trim(),
-      body: bodyMatch[1].replace(/^["']|["']$/g, "").trim(),
+      subject: stripMarkdown(subjectMatch[1].replace(/^["']|["']$/g, "").trim()),
+      body: stripMarkdown(bodyMatch[1].replace(/^["']|["']$/g, "").trim()),
     };
   }
-
-  // Fallback: first line = subject, rest = body
   const lines = raw.trim().split("\n");
   if (lines.length >= 2) {
     return {
-      subject: lines[0].replace(/^(SUBJECT:|Subject:)/i, "").trim(),
-      body: lines.slice(1).join("\n").replace(/^(BODY:|Body:)/i, "").trim(),
+      subject: stripMarkdown(lines[0].replace(/^(SUBJECT:|Subject:)/i, "").trim()),
+      body: stripMarkdown(lines.slice(1).join("\n").replace(/^(BODY:|Body:)/i, "").trim()),
     };
   }
-
   throw new Error("Could not parse AI response");
 }
 
-// ─── Route handler ────────────────────────────────────────────────────────────
-
+// ─── SSE streaming POST handler ───────────────────────────────────────────────
 export async function POST(request: NextRequest) {
-  try {
-    // Auth
-    const supabase = await createClient();
-    const { data: { user }, error: authError } = await supabase.auth.getUser();
-    if (authError || !user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    const { leads, yourCompany, yourService, tone, customPainPoint } = await request.json() as {
-      leads: LeadInput[];
-      yourCompany: string;
-      yourService: string;
-      tone: string;
-      customPainPoint?: string;
-    };
-
-    if (!leads?.length) {
-      return NextResponse.json({ error: "No leads provided" }, { status: 400 });
-    }
-
-    // Fetch AI provider — same table the rest of the app uses
-    const serviceSupabase = createServiceClient();
-    let { data: aiProvider } = await serviceSupabase
-      .from("ai_settings")
-      .select("provider, api_key, active_model")
-      .eq("user_id", user.id)
-      .eq("is_active", true)
-      .maybeSingle();
-
-    if (!aiProvider?.api_key) {
-      // Fall back to any configured provider
-      const { data: anyProvider } = await serviceSupabase
-        .from("ai_settings")
-        .select("provider, api_key, active_model")
-        .eq("user_id", user.id)
-        .limit(1)
-        .maybeSingle();
-      aiProvider = anyProvider;
-    }
-
-    if (!aiProvider?.api_key) {
-      return NextResponse.json(
-        { error: "No AI provider configured. Please add your API key in AI Settings." },
-        { status: 400 }
-      );
-    }
-
-    const results: GeneratedEmail[] = [];
-    let rateLimitHits = 0;
-
-    for (let i = 0; i < leads.length; i++) {
-      const lead = leads[i];
-
-      try {
-        const prompt = buildPrompt(lead, yourCompany, yourService, tone, customPainPoint);
-        const raw = await callAI(aiProvider, prompt);
-        const { subject, body } = parseResponse(raw);
-
-        results.push({
-          lead_id: lead.id,
-          lead_email: lead.email,
-          company_name: lead.company_name,
-          subject,
-          body,
-          model: aiProvider.active_model ?? aiProvider.provider,
-          isFallback: false,
-        });
-
-        // Pace requests: 2.5 s between calls = 24 req/min, safely under the 30/min limit
-        if (i < leads.length - 1) {
-          await new Promise((r) => setTimeout(r, 2500));
-        }
-      } catch (err: any) {
-        if (err.message === "rate_limit_exhausted") {
-          rateLimitHits++;
-          // Use a fallback template so the user still gets something
-        }
-
-        // Fallback template — always better than nothing
-        const subject = `Quick question about ${lead.company_name}`;
-        const body = `${lead.company_name} — most ${lead.niche ?? "businesses"} in ${lead.location ?? "your area"} are dealing with [specific problem].\n\n${yourService} fixes this. Setup takes under a day.\n\n15-minute call this week?\n\n${yourCompany}`;
-
-        results.push({
-          lead_id: lead.id,
-          lead_email: lead.email,
-          company_name: lead.company_name,
-          subject,
-          body,
-          model: "Fallback",
-          isFallback: true,
-        });
-      }
-    }
-
-    const aiCount = results.filter((r) => !r.isFallback).length;
-    const fallbackCount = results.filter((r) => r.isFallback).length;
-
-    return NextResponse.json({
-      success: true,
-      emails: results,
-      stats: { total: results.length, ai: aiCount, fallback: fallbackCount, rateLimitHits },
-    });
-  } catch (error: any) {
-    console.error("[generate-emails-bulk] error:", error);
-    return NextResponse.json({ error: error.message ?? "Internal error" }, { status: 500 });
+  // Auth
+  const supabase = await createClient();
+  const { data: { user }, error: authError } = await supabase.auth.getUser();
+  if (authError || !user) {
+    return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
   }
+
+  const { leads, yourCompany, yourService, tone, customPainPoint } = await request.json() as {
+    leads: LeadInput[];
+    yourCompany: string;
+    yourService: string;
+    tone: string;
+    customPainPoint?: string;
+  };
+
+  if (!leads?.length) {
+    return new Response(JSON.stringify({ error: "No leads provided" }), { status: 400 });
+  }
+
+  // Fetch AI provider
+  const serviceSupabase = createServiceClient();
+  let { data: aiProvider } = await serviceSupabase
+    .from("ai_settings").select("provider, api_key, active_model")
+    .eq("user_id", user.id).eq("is_active", true).maybeSingle();
+
+  if (!aiProvider?.api_key) {
+    const { data: any } = await serviceSupabase
+      .from("ai_settings").select("provider, api_key, active_model")
+      .eq("user_id", user.id).limit(1).maybeSingle();
+    aiProvider = any;
+  }
+
+  if (!aiProvider?.api_key) {
+    return new Response(JSON.stringify({ error: "No AI provider configured." }), { status: 400 });
+  }
+
+  const provider = aiProvider;
+  const CONCURRENCY = 15;
+
+  const makeFallback = (lead: LeadInput) => ({
+    lead_id: lead.id,
+    lead_email: lead.email,
+    company_name: lead.company_name,
+    subject: `Helping ${lead.company_name} improve operations with AI`,
+    body: `Dear ${lead.company_name} Team,\n\nMany ${lead.niche ?? "businesses"} in ${lead.location ?? "your region"} are facing challenges with operational efficiency and workflow management.\n\nAt Pryro, we help companies like yours save time, reduce manual work, and scale effectively through AI automation and custom software solutions.\n\nWould you be open to a quick 15-minute discovery call this week?\n\nBest regards,\n${yourCompany}`,
+    model: "Fallback",
+    isFallback: true,
+  });
+
+  // ── SSE stream ────────────────────────────────────────────────────────────
+  const stream = new ReadableStream({
+    async start(controller) {
+      const enc = new TextEncoder();
+
+      const send = (event: string, data: object) => {
+        controller.enqueue(enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+      };
+
+      // Send total count so client can show progress
+      send("start", { total: leads.length });
+
+      let done = 0;
+      let fallbacks = 0;
+
+      const processLead = async (lead: LeadInput) => {
+        try {
+          const prompt = buildPrompt(lead, yourCompany, yourService, tone, customPainPoint);
+          const raw = await callAI(provider, prompt);
+          const { subject, body } = parseResponse(raw);
+          const email = {
+            lead_id: lead.id,
+            lead_email: lead.email,
+            company_name: lead.company_name,
+            subject,
+            body,
+            model: provider.active_model ?? provider.provider,
+            isFallback: false,
+          };
+          done++;
+          send("email", { email, done, total: leads.length });
+          return email;
+        } catch {
+          const email = makeFallback(lead);
+          done++;
+          fallbacks++;
+          send("email", { email, done, total: leads.length });
+          return email;
+        }
+      };
+
+      // Process in parallel batches, stream each result immediately
+      for (let i = 0; i < leads.length; i += CONCURRENCY) {
+        const batch = leads.slice(i, i + CONCURRENCY);
+        await Promise.all(batch.map(processLead));
+        if (i + CONCURRENCY < leads.length) {
+          await new Promise((r) => setTimeout(r, 200));
+        }
+      }
+
+      send("done", {
+        total: leads.length,
+        ai: leads.length - fallbacks,
+        fallback: fallbacks,
+      });
+
+      controller.close();
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+    },
+  });
 }

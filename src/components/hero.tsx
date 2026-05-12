@@ -5,14 +5,14 @@ export default function Hero() {
   return (
     <div className="relative overflow-hidden bg-white">
       {/* Background gradient */}
-      <div className="absolute inset-0 bg-gradient-to-br from-blue-50 via-white to-purple-50 opacity-70" />
+      <div className="absolute inset-0 bg-gradient-to-br from-blue-50 via-white to-blue-50 opacity-70" />
       
       <div className="relative pt-24 pb-32 sm:pt-32 sm:pb-40">
         <div className="container mx-auto px-4">
           <div className="text-center max-w-4xl mx-auto">
             <h1 className="text-5xl sm:text-6xl font-bold text-gray-900 mb-8 tracking-tight">
               Build{" "}
-              <span className="text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-purple-600">
+              <span className="text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-blue-500">
                 Faster
               </span>
               {" "}with Our Next-Gen Platform
