@@ -23,20 +23,19 @@ export default function RootLayout({
       <body className={inter.className}>
         <ThemeProvider
           attribute="class"
-          defaultTheme="dark"
-          enableSystem
+          defaultTheme="light"
+          enableSystem={false}
           disableTransitionOnChange
         >
           {children}
           <Toaster
-            theme="dark"
+            theme="light"
             position="bottom-right"
             toastOptions={{
               style: {
-                background: "#161920",
-                border: "1px solid #2A2D35",
-                color: "#e8eaed",
-                fontFamily: "Space Grotesk, sans-serif",
+                background: "#ffffff",
+                border: "1px solid #e5e7eb",
+                color: "#111827",
               },
             }}
           />

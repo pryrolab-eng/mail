@@ -361,7 +361,7 @@ export default function SequencesModule({ userId }: SequencesModuleProps) {
                         </p>
                       </div>
                       <div className="flex items-center gap-2">
-                        <span className="text-xs px-2 py-1 rounded-full bg-purple-50 text-purple-600 border border-purple-100">
+                        <span className="text-xs px-2 py-1 rounded-full bg-blue-50 text-blue-600 border border-blue-100">
                           {sequence.tone}
                         </span>
                       </div>

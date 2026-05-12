@@ -16,10 +16,10 @@ interface EmailWriterProps {
   preloadedLead?: Lead | null;
 }
 
-const TONE_OPTIONS: { value: ToneType; label: string; desc: string; color: string }[] = [
-  { value: "Direct",    label: "Direct",    desc: "Hard direct. No politeness. Problem → Solution → CTA",              color: "#2563EB" },
-  { value: "Aggressive",label: "Aggressive",desc: "High urgency, creates FOMO, pushes action hard",       color: "#DC2626" },
-  { value: "Surgical",  label: "Surgical",  desc: "Hyper-personalized, proves you did your homework",     color: "#7C3AED" },
+const TONE_OPTIONS: { value: ToneType; label: string; desc: string }[] = [
+  { value: "Direct",     label: "Direct",     desc: "Hard direct. No politeness. Problem → Solution → CTA" },
+  { value: "Aggressive", label: "Aggressive", desc: "High urgency, creates FOMO, pushes action hard" },
+  { value: "Surgical",   label: "Surgical",   desc: "Hyper-personalized, proves you did your homework" },
 ];
 
 export default function EmailWriterModule({ userId, preloadedLead }: EmailWriterProps) {
@@ -64,7 +64,7 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
   // ── Bulk mode ─────────────────────────────────────────────────────────────
   const [selectedLeadIds, setSelectedLeadIds] = useState<Set<string>>(new Set());
   const [bulkEmails, setBulkEmails]           = useState<any[]>([]);
-  const [previewIndex, setPreviewIndex]       = useState(0);
+  const [previewIndex, setPreviewIndex]       = useState(-1);
   const [isSendingBulk, setIsSendingBulk]     = useState(false);
   const [bulkTone, setBulkTone]               = useState<ToneType>("Direct");
   const [bulkPainPoint, setBulkPainPoint]     = useState("");
@@ -97,27 +97,35 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
 
   /** Load saved company/service from followup_settings */
   const loadSenderProfile = async () => {
-    const { data } = await supabase
-      .from("followup_settings")
-      .select("your_company, your_service")
-      .eq("user_id", userId)
-      .maybeSingle();
-    if (data) {
-      if (data.your_company) setYourCompany(data.your_company);
-      if (data.your_service) setYourService(data.your_service);
+    try {
+      const { data, error } = await supabase
+        .from("followup_settings")
+        .select("your_company, your_service")
+        .eq("user_id", userId)
+        .maybeSingle();
+      if (!error && data) {
+        if (data.your_company) setYourCompany(data.your_company);
+        if (data.your_service) setYourService(data.your_service);
+      }
+    } catch {
+      // Table may not exist yet — silently ignore
     }
   };
 
   /** Save company/service to followup_settings (upsert) */
   const saveSenderProfile = async (company: string, service: string) => {
-    await supabase
-      .from("followup_settings")
-      .upsert(
-        { user_id: userId, your_company: company, your_service: service, updated_at: new Date().toISOString() },
-        { onConflict: "user_id" }
-      );
-    setProfileSaved(true);
-    setTimeout(() => setProfileSaved(false), 2000);
+    try {
+      await supabase
+        .from("followup_settings")
+        .upsert(
+          { user_id: userId, your_company: company, your_service: service, updated_at: new Date().toISOString() },
+          { onConflict: "user_id" }
+        );
+      setProfileSaved(true);
+      setTimeout(() => setProfileSaved(false), 2000);
+    } catch {
+      // Silently ignore if table doesn't exist
+    }
   };
 
   const filteredLeads = nicheFilter === "all"
@@ -365,7 +373,6 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
     setBulkEmails([]);
 
     const selected = leads.filter((l) => selectedLeadIds.has(l.id));
-    const toastId = toast.loading(`Generating ${selected.length} emails on server… this may take a minute`);
 
     try {
       const res = await fetch("/api/generate-emails-bulk", {
@@ -387,41 +394,67 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
         }),
       });
 
-      const data = await res.json();
-      toast.dismiss(toastId);
-
-      if (!res.ok || !data.success) {
-        toast.error(data.error || "Failed to generate emails");
+      if (!res.ok || !res.body) {
+        const err = await res.json().catch(() => ({}));
+        toast.error(err.error || "Failed to start generation");
+        setIsGenerating(false);
         return;
       }
 
-      // Map server results back to the bulk email preview format
-      const emails = (data.emails as any[]).map((e) => ({
-        lead: selected.find((l) => l.id === e.lead_id) ?? null,
-        lead_email: e.lead_email,
-        company_name: e.company_name,
-        subject: e.subject,
-        body: e.body,
-        model: e.model,
-        isFallback: e.isFallback,
-        isEditing: false,
-        editSubject: e.subject,
-        editBody: e.body,
-      }));
+      // ── Read SSE stream ──────────────────────────────────────────────────
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
 
-      setBulkEmails(emails);
-      setPreviewIndex(0);
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      const { ai, fallback, rateLimitHits } = data.stats;
-      if (fallback === 0) {
-        toast.success(`✅ Generated ${ai} AI emails!`);
-      } else if (ai === 0) {
-        toast.warning(`⚠️ All ${fallback} emails used fallback template (rate limit). Review before sending.`);
-      } else {
-        toast.success(`Generated ${ai} AI + ${fallback} fallback emails${rateLimitHits > 0 ? " (rate limit hit)" : ""}`);
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() ?? "";
+
+        for (const part of parts) {
+          const eventLine = part.match(/^event:\s*(.+)/m);
+          const dataLine  = part.match(/^data:\s*(.+)/m);
+          if (!eventLine || !dataLine) continue;
+
+          const event = eventLine[1].trim();
+          let payload: any;
+          try { payload = JSON.parse(dataLine[1]); } catch { continue; }
+
+          if (event === "start") {
+            // nothing — we already cleared bulkEmails above
+          } else if (event === "email") {
+            const e = payload.email;
+            setBulkEmails((prev) => [
+              ...prev,
+              {
+                lead: selected.find((l) => l.id === e.lead_id) ?? null,
+                lead_email: e.lead_email,
+                company_name: e.company_name,
+                subject: e.subject,
+                body: e.body,
+                model: e.model,
+                isFallback: e.isFallback,
+                isEditing: false,
+                editSubject: e.subject,
+                editBody: e.body,
+              },
+            ]);
+          } else if (event === "done") {
+            const { ai, fallback } = payload;
+            if (fallback === 0) {
+              toast.success(`Generated ${ai} AI emails!`);
+            } else if (ai === 0) {
+              toast.warning(`All ${fallback} emails used fallback template. Review before sending.`);
+            } else {
+              toast.success(`Generated ${ai} AI + ${fallback} fallback emails`);
+            }
+          }
+        }
       }
     } catch (err: any) {
-      toast.dismiss(toastId);
       toast.error(err.message || "Network error — could not reach generation server");
     } finally {
       setIsGenerating(false);
@@ -485,9 +518,9 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
     if (!testAddr?.includes("@")) { toast.error("Invalid email"); return; }
     setIsSendingBulk(true);
     try {
-      const cur = bulkEmails[previewIndex];
+      const cur = bulkEmails[previewIndex >= 0 ? previewIndex : 0];
       const { sendBulkEmailsChunkedAction } = await import("@/app/actions");
-      const result = await sendBulkEmailsChunkedAction(userId, [{ lead_id: cur.lead?.id || "test", lead_email: testAddr, company_name: cur.company_name, subject: "[TEST] " + cur.subject, body: cur.body }], { chunkSize: 1, delayBetweenEmails: 0, verifyEmails: false });
+      const result = await sendBulkEmailsChunkedAction(userId, [{ lead_id: cur.lead?.id || "test", lead_email: testAddr, company_name: cur.company_name, subject: "[TEST] " + (cur.editSubject || cur.subject), body: cur.editBody || cur.body }], { chunkSize: 1, delayBetweenEmails: 0, verifyEmails: false });
       if (result.success) toast.success("Test sent to " + testAddr);
       else toast.error(result.error || "Failed");
     } catch (e: any) { toast.error(e.message || "Error"); }
@@ -499,23 +532,27 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
     <div className="flex flex-col h-full overflow-hidden">
 
       {/* Mode tabs */}
-      <div className="flex items-center gap-2 px-6 pt-5 pb-4 border-b border-gray-200 bg-white flex-shrink-0">
+      <div className="flex items-center gap-2 px-6 pt-4 pb-3 border-b border-gray-200 bg-white flex-shrink-0">
         {[
-          { id: "single", label: "Single Email", icon: Sparkles, activeColor: "bg-blue-600 text-white" },
-          { id: "bulk",   label: "Bulk Generator", icon: Users,    activeColor: "bg-blue-600 text-white" },
-          { id: "manual", label: "Manual Compose", icon: PenLine,  activeColor: "bg-orange-500 text-white" },
-        ].map(({ id, label, icon: Icon, activeColor }) => (
+          { id: "single", label: "Single Email",   icon: Sparkles },
+          { id: "bulk",   label: "Bulk Generator", icon: Users    },
+          { id: "manual", label: "Manual Compose", icon: PenLine  },
+        ].map(({ id, label, icon: Icon }) => (
           <button
             key={id}
             onClick={() => setMode(id as any)}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all ${mode === id ? activeColor : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all ${
+              mode === id ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+            }`}
           >
             <Icon size={14} />
             {label}
           </button>
         ))}
         {mode === "bulk" && (
-          <span className="ml-auto text-sm text-gray-500">{selectedLeadIds.size} selected · {leads.filter(l => !SENT_STATUSES.has(l.status)).length} unsent</span>
+          <span className="ml-auto text-sm text-gray-600 font-medium">
+            {selectedLeadIds.size} selected · {leads.filter(l => !SENT_STATUSES.has(l.status)).length} unsent
+          </span>
         )}
       </div>
 
@@ -525,15 +562,15 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
             SINGLE EMAIL MODE
         ══════════════════════════════════════════════════════════════════ */}
         {mode === "single" && (
-          <div className="p-6 flex flex-col gap-5 max-w-2xl">
+          <div className="p-6 flex flex-col gap-5 w-full max-w-3xl">
 
             {/* Lead selector */}
             <div>
-              <label className="block text-xs font-semibold uppercase tracking-widest mb-2 text-gray-500">Target Lead</label>
+              <label className="block text-sm font-semibold text-gray-800 mb-2">Target Lead</label>
               <div className="relative" ref={dropdownRef}>
                 <button
                   onClick={() => setLeadDropdownOpen((v) => !v)}
-                  className="w-full flex items-center justify-between px-4 py-3 rounded-xl border border-gray-300 bg-white text-sm text-gray-700 hover:border-blue-400 transition-all"
+                  className="w-full flex items-center justify-between px-4 py-3 rounded-lg border border-gray-300 bg-white text-sm text-gray-700 hover:border-blue-400 transition-all"
                 >
                   <span className={selectedLead ? "text-gray-900 font-medium" : "text-gray-400"}>
                     {selectedLead ? `${selectedLead.company_name}${selectedLead.email ? " — " + selectedLead.email : ""}` : "Select a lead…"}
@@ -541,7 +578,7 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
                   <ChevronDown size={15} className="text-gray-400 flex-shrink-0" />
                 </button>
                 {leadDropdownOpen && (
-                  <div className="absolute z-20 mt-1 w-full bg-white border border-gray-200 rounded-xl shadow-lg overflow-hidden">
+                  <div className="absolute z-20 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg overflow-hidden">
                     <div className="p-2 border-b border-gray-100">
                       <input
                         autoFocus
@@ -622,19 +659,19 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
             </div>
 
             {/* Sender profile — fill once, auto-saved */}
-            <div className="rounded-xl border border-gray-200 overflow-hidden">
+            <div className="rounded-lg border border-gray-200 overflow-hidden">
               <div className="flex items-center justify-between px-4 py-3 bg-gray-50 border-b border-gray-100">
-                <span className="text-xs font-semibold uppercase tracking-widest text-gray-500">Your Profile</span>
+                <span className="text-sm font-semibold text-gray-800">Your Profile</span>
                 {yourCompany && yourService
-                  ? <span className="text-[10px] text-green-600 font-medium flex items-center gap-1">
+                  ? <span className="text-xs text-gray-500 font-medium flex items-center gap-1">
                       {profileSaved ? "✓ Saved" : `${yourCompany} · ${yourService}`}
                     </span>
-                  : <span className="text-[10px] text-orange-500">Fill once — used for all emails</span>
+                  : <span className="text-xs text-gray-500">Fill once — used for all emails</span>
                 }
               </div>
               <div className="grid grid-cols-2 gap-3 p-4">
                 <div>
-                  <label className="block text-[10px] font-semibold uppercase tracking-widest mb-1.5 text-gray-400">Your Company</label>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1.5">Your Company</label>
                   <input
                     value={yourCompany}
                     onChange={(e) => setYourCompany(e.target.value)}
@@ -644,7 +681,7 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
                   />
                 </div>
                 <div>
-                  <label className="block text-[10px] font-semibold uppercase tracking-widest mb-1.5 text-gray-400">Your Service / Product</label>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1.5">Your Service / Product</label>
                   <input
                     value={yourService}
                     onChange={(e) => setYourService(e.target.value)}
@@ -658,19 +695,19 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
 
             {/* Tone selector */}
             <div>
-              <label className="block text-xs font-semibold uppercase tracking-widest mb-2 text-gray-500">Tone</label>
+              <label className="block text-sm font-semibold text-gray-800 mb-2">Tone</label>
               <div className="grid grid-cols-3 gap-2">
                 {TONE_OPTIONS.map((t) => (
                   <button
                     key={t.value}
                     onClick={() => setTone(t.value)}
-                    className="flex flex-col gap-1 p-3 rounded-xl border-2 text-left transition-all"
-                    style={{
-                      borderColor: tone === t.value ? t.color : "#E5E7EB",
-                      background: tone === t.value ? t.color + "10" : "#F9FAFB",
-                    }}
+                    className={`flex flex-col gap-1 p-3 rounded-lg border-2 text-left transition-all ${
+                      tone === t.value
+                        ? "border-blue-600 bg-blue-50"
+                        : "border-gray-200 bg-white hover:border-gray-300"
+                    }`}
                   >
-                    <span className="text-xs font-bold" style={{ color: tone === t.value ? t.color : "#374151" }}>{t.label}</span>
+                    <span className={`text-xs font-bold ${tone === t.value ? "text-blue-700" : "text-gray-900"}`}>{t.label}</span>
                     <span className="text-[10px] text-gray-500 leading-tight">{t.desc}</span>
                   </button>
                 ))}
@@ -679,14 +716,14 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
 
             {/* Optional pain point */}
             <div>
-              <label className="block text-xs font-semibold uppercase tracking-widest mb-2 text-gray-500">
+              <label className="block text-sm font-semibold text-gray-800 mb-2">
                 Specific Pain Point <span className="normal-case font-normal text-gray-400">(optional — makes email sharper)</span>
               </label>
               <input
                 value={customPainPoint}
                 onChange={(e) => setCustomPainPoint(e.target.value)}
                 placeholder="e.g. losing leads due to slow follow-up, high customer churn, manual reporting…"
-                className="w-full px-4 py-3 rounded-xl text-sm border border-gray-300 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 bg-white outline-none transition-all"
+                className="w-full px-4 py-3 rounded-lg text-sm border border-gray-300 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 bg-white outline-none transition-all"
               />
             </div>
 
@@ -694,7 +731,7 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
             <button
               onClick={generateEmail}
               disabled={isGenerating || !selectedLead}
-              className="w-full py-3.5 rounded-xl text-sm font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 text-white bg-blue-600 hover:bg-blue-700"
+              className="w-full py-3.5 rounded-lg text-sm font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 text-white bg-blue-600 hover:bg-blue-700"
             >
               {isGenerating
                 ? <><Loader2 size={16} className="animate-spin" /> Generating with AI…</>
@@ -703,7 +740,7 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
 
             {/* Generated email output */}
             {generatedEmail && (
-              <div className="rounded-xl border border-gray-200 overflow-hidden">
+              <div className="rounded-lg border border-gray-200 overflow-hidden">
                 {/* Email header */}
                 <div className="flex items-center justify-between px-4 py-3 bg-gray-50 border-b border-gray-200">
                   <div className="flex items-center gap-2">
@@ -730,7 +767,7 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
 
                 {/* Subject */}
                 <div className="px-4 py-3 border-b border-gray-100">
-                  <p className="text-[10px] uppercase tracking-widest text-gray-400 mb-1">Subject</p>
+                  <p className="text-xs font-semibold text-gray-700 mb-1">Subject</p>
                   {isEditing
                     ? <input value={editSubject} onChange={(e) => setEditSubject(e.target.value)} className="w-full text-sm font-semibold text-gray-900 bg-white border border-blue-400 rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-blue-200" />
                     : <p className="text-sm font-semibold text-gray-900">{generatedEmail.subject}</p>}
@@ -738,7 +775,7 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
 
                 {/* Body */}
                 <div className="px-4 py-3">
-                  <p className="text-[10px] uppercase tracking-widest text-gray-400 mb-2">Body</p>
+                  <p className="text-xs font-semibold text-gray-700 mb-2">Body</p>
                   {isEditing
                     ? <textarea value={editBody} onChange={(e) => setEditBody(e.target.value)} rows={12} className="w-full text-sm text-gray-900 bg-white border border-blue-400 rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-blue-200 resize-none" style={{ lineHeight: "1.7" }} />
                     : <pre className="text-sm text-gray-700 whitespace-pre-wrap font-sans leading-relaxed">{generatedEmail.body}</pre>}
@@ -770,14 +807,14 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
                       value={customRecipient}
                       onChange={(e) => setCustomRecipient(e.target.value)}
                       placeholder="Enter any email address…"
-                      className="w-full px-4 py-2.5 rounded-xl text-sm text-gray-900 border border-gray-300 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 bg-white outline-none transition-all placeholder:text-gray-400"
+                      className="w-full px-4 py-2.5 rounded-lg text-sm text-gray-900 border border-gray-300 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 bg-white outline-none transition-all placeholder:text-gray-400"
                     />
                   )}
 
                   <button
                     onClick={sendSingleEmail}
                     disabled={isSendingSingle}
-                    className="w-full py-3 rounded-xl text-sm font-semibold transition-all disabled:opacity-50 flex items-center justify-center gap-2 text-white bg-green-600 hover:bg-green-700"
+                    className="w-full py-3 rounded-lg text-sm font-semibold transition-all disabled:opacity-50 flex items-center justify-center gap-2 text-white bg-blue-600 hover:bg-blue-700"
                   >
                     {isSendingSingle
                       ? <><Loader2 size={15} className="animate-spin" /> Sending…</>
@@ -794,27 +831,27 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
         ══════════════════════════════════════════════════════════════════ */}
         {mode === "bulk" && (
           <div className="p-6 flex flex-col gap-5">
-            {bulkEmails.length === 0 ? (
+            {bulkEmails.length === 0 && !isGenerating ? (
               <>
                 {/* Sender profile (shared with single mode) */}
-                <div className="rounded-xl border border-gray-200 overflow-hidden">
+                <div className="rounded-lg border border-gray-200 overflow-hidden">
                   <div className="flex items-center justify-between px-4 py-3 bg-gray-50 border-b border-gray-100">
-                    <span className="text-xs font-semibold uppercase tracking-widest text-gray-500">Your Profile</span>
+                    <span className="text-sm font-semibold text-gray-800">Your Profile</span>
                     {yourCompany && yourService
-                      ? <span className="text-[10px] text-green-600 font-medium">{yourCompany} · {yourService}</span>
-                      : <span className="text-[10px] text-orange-500">Fill once — used for all emails</span>
+                      ? <span className="text-xs text-gray-500 font-medium">{yourCompany} · {yourService}</span>
+                      : <span className="text-xs text-gray-500">Fill once — used for all emails</span>
                     }
                   </div>
                   <div className="grid grid-cols-2 gap-3 p-4">
                     <div>
-                      <label className="block text-[10px] font-semibold uppercase tracking-widest mb-1.5 text-gray-400">Your Company</label>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1.5">Your Company</label>
                       <input value={yourCompany} onChange={(e) => setYourCompany(e.target.value)}
                         onBlur={() => yourCompany && yourService && saveSenderProfile(yourCompany, yourService)}
                         placeholder="e.g. Acme Inc"
                         className="w-full px-3 py-2.5 rounded-lg text-sm text-gray-900 border border-gray-300 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 bg-white outline-none transition-all placeholder:text-gray-400" />
                     </div>
                     <div>
-                      <label className="block text-[10px] font-semibold uppercase tracking-widest mb-1.5 text-gray-400">Your Service / Product</label>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1.5">Your Service / Product</label>
                       <input value={yourService} onChange={(e) => setYourService(e.target.value)}
                         onBlur={() => yourCompany && yourService && saveSenderProfile(yourCompany, yourService)}
                         placeholder="e.g. AI-powered CRM"
@@ -825,13 +862,16 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
 
                 {/* Tone */}
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-widest mb-2 text-gray-500">Tone</label>
+                  <label className="block text-sm font-semibold text-gray-800 mb-2">Tone</label>
                   <div className="grid grid-cols-3 gap-2">
                     {TONE_OPTIONS.map((t) => (
                       <button key={t.value} onClick={() => setBulkTone(t.value)}
-                        className="flex flex-col gap-1 p-3 rounded-xl border-2 text-left transition-all"
-                        style={{ borderColor: bulkTone === t.value ? t.color : "#E5E7EB", background: bulkTone === t.value ? t.color + "10" : "#F9FAFB" }}>
-                        <span className="text-xs font-bold" style={{ color: bulkTone === t.value ? t.color : "#374151" }}>{t.label}</span>
+                        className={`flex flex-col gap-1 p-3 rounded-lg border-2 text-left transition-all ${
+                          bulkTone === t.value
+                            ? "border-blue-600 bg-blue-50"
+                            : "border-gray-200 bg-white hover:border-gray-300"
+                        }`}>
+                        <span className={`text-xs font-bold ${bulkTone === t.value ? "text-blue-700" : "text-gray-900"}`}>{t.label}</span>
                         <span className="text-[10px] text-gray-500 leading-tight">{t.desc}</span>
                       </button>
                     ))}
@@ -840,15 +880,15 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
 
                 {/* Pain point */}
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-widest mb-2 text-gray-500">Pain Point <span className="normal-case font-normal text-gray-400">(optional)</span></label>
+                  <label className="block text-sm font-semibold text-gray-800 mb-2">Pain Point <span className="normal-case font-normal text-gray-400">(optional)</span></label>
                   <input value={bulkPainPoint} onChange={(e) => setBulkPainPoint(e.target.value)} placeholder="e.g. slow follow-up, high churn…"
-                    className="w-full px-4 py-3 rounded-xl text-sm border border-gray-300 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 bg-white outline-none transition-all" />
+                    className="w-full px-4 py-3 rounded-lg text-sm border border-gray-300 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 bg-white outline-none transition-all" />
                 </div>
 
                 {/* Niche filter — clicking a niche auto-selects all leads in it */}
                 {categories.length > 0 && (
                   <div>
-                    <label className="block text-xs font-semibold uppercase tracking-widest mb-2 text-gray-500">
+                    <label className="block text-sm font-semibold text-gray-800 mb-2">
                       Filter by Niche <span className="normal-case font-normal text-gray-400">(click to auto-select all leads in that niche)</span>
                     </label>
                     <div className="flex flex-wrap gap-2">
@@ -879,14 +919,14 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
                 {/* Lead list */}
                 <div>
                   <div className="flex items-center justify-between mb-2">
-                    <label className="text-xs font-semibold uppercase tracking-widest text-gray-500">
+                    <label className="text-sm font-semibold text-gray-800">
                       Unsent Leads ({selectedLeadIds.size} selected)
                     </label>
                     <button onClick={selectAll} className="text-xs text-blue-600 hover:text-blue-700 font-medium">
                       {unsentLeads.every((l) => selectedLeadIds.has(l.id)) ? "Deselect all" : "Select all unsent"}
                     </button>
                   </div>
-                  <div className="border border-gray-200 rounded-xl overflow-hidden max-h-72 overflow-y-auto">
+                  <div className="border border-gray-200 rounded-lg overflow-hidden max-h-72 overflow-y-auto">
                     {unsentLeads.length === 0 && alreadySent.length === 0 && (
                       <p className="text-xs text-gray-400 text-center py-6">No leads found</p>
                     )}
@@ -918,7 +958,7 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
                       <div className="border-t-2 border-dashed border-gray-200">
                         <div className="px-4 py-2 bg-gray-50 flex items-center gap-2">
                           <CheckCircle size={12} className="text-green-500" />
-                          <span className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide">
+                          <span className="text-xs font-semibold text-gray-500">
                             Already Sent ({alreadySent.length}) — excluded from selection
                           </span>
                         </div>
@@ -938,88 +978,207 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
                 </div>
 
                 <button onClick={generateBulkEmails} disabled={isGenerating || selectedLeadIds.size === 0}
-                  className="w-full py-3.5 rounded-xl text-sm font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 text-white bg-blue-600 hover:bg-blue-700">
+                  className="w-full py-3.5 rounded-lg text-sm font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 text-white bg-blue-600 hover:bg-blue-700">
                   {isGenerating
-                    ? <><Loader2 size={16} className="animate-spin" /> Generating {selectedLeadIds.size} emails…</>
+                    ? <><Loader2 size={16} className="animate-spin" /> Generating… {bulkEmails.length > 0 ? `${bulkEmails.length} / ${selectedLeadIds.size}` : ""}</>
                     : <><Sparkles size={16} /> Generate {selectedLeadIds.size} Emails</>}
                 </button>
               </>
             ) : (
-              /* Bulk preview */
-              <div className="flex flex-col gap-4">
-                <div className="flex items-center justify-between">
-                  <p className="text-sm font-semibold text-gray-700">{bulkEmails.length} emails ready</p>
-                  <button onClick={() => setBulkEmails([])} className="text-xs text-gray-500 hover:text-gray-700">← Back to selection</button>
+              /* ── Bulk review table ─────────────────────────────────────── */
+              <div className="flex flex-col h-full">
+                {/* Header bar */}
+                <div className="flex items-center justify-between mb-3 flex-shrink-0">
+                  <div className="flex items-center gap-3">
+                    <p className="text-sm font-bold text-gray-900">
+                      {isGenerating
+                        ? <span className="flex items-center gap-2"><Loader2 size={14} className="animate-spin text-blue-600" /> Generating… {bulkEmails.length} / {selectedLeadIds.size}</span>
+                        : `${bulkEmails.length} emails ready to send`
+                      }
+                    </p>
+                    {!isGenerating && <span className="text-xs text-gray-500">Review and edit before sending</span>}
+                  </div>
+                  {!isGenerating && (
+                    <button
+                      onClick={() => setBulkEmails([])}
+                      className="text-xs text-gray-500 hover:text-gray-700 border border-gray-300 px-3 py-1.5 rounded-lg hover:bg-gray-50"
+                    >
+                      ← Back
+                    </button>
+                  )}
                 </div>
 
-                {/* Preview navigator */}
-                <div className="rounded-xl border border-gray-200 overflow-hidden">
-                  <div className="flex items-center justify-between px-4 py-3 bg-gray-50 border-b border-gray-200">
-                    <span className="text-xs font-semibold text-gray-600">{bulkEmails[previewIndex]?.company_name}</span>
-                    <div className="flex items-center gap-3">
-                      <button 
-                        onClick={() => {
-                          const updated = [...bulkEmails];
-                          updated[previewIndex].isEditing = !updated[previewIndex].isEditing;
-                          setBulkEmails(updated);
-                        }}
-                        className="p-1.5 rounded-lg hover:bg-gray-200 transition-colors" 
-                        title="Edit email"
-                      >
-                        <Edit3 size={13} className="text-gray-500" />
-                      </button>
-                      <div className="flex items-center gap-2 border-l border-gray-300 pl-3">
-                        <button onClick={() => setPreviewIndex((v) => Math.max(0, v - 1))} disabled={previewIndex === 0} className="p-1 rounded hover:bg-gray-200 disabled:opacity-30"><ChevronLeft size={14} /></button>
-                        <span className="text-xs text-gray-500">{previewIndex + 1} / {bulkEmails.length}</span>
-                        <button onClick={() => setPreviewIndex((v) => Math.min(bulkEmails.length - 1, v + 1))} disabled={previewIndex === bulkEmails.length - 1} className="p-1 rounded hover:bg-gray-200 disabled:opacity-30"><ChevronRight size={14} /></button>
+                {/* Table */}
+                <div className="border border-gray-200 rounded-lg overflow-hidden flex-1 min-h-0">
+                  <div className="overflow-auto" style={{ maxHeight: "calc(100vh - 320px)" }}>
+                    <table className="w-full text-sm">
+                      <thead className="sticky top-0 bg-gray-50 border-b border-gray-200 z-10">
+                        <tr>
+                          <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-600 w-40">Company</th>
+                          <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-600 w-48">Email</th>
+                          <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-600">Subject</th>
+                          <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-600 w-24">Status</th>
+                          <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-600 w-16">Edit</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {bulkEmails.map((email, idx) => (
+                          <tr
+                            key={idx}
+                            className={`hover:bg-gray-50 transition-colors ${email.isFallback ? "bg-amber-50/40" : ""}`}
+                          >
+                            <td className="px-4 py-3">
+                              <p className="text-xs font-semibold text-gray-900 truncate max-w-[140px]">{email.company_name}</p>
+                            </td>
+                            <td className="px-4 py-3">
+                              <p className="text-xs text-gray-500 truncate max-w-[180px]">{email.lead_email || "—"}</p>
+                            </td>
+                            <td className="px-4 py-3">
+                              {email.isEditing ? (
+                                <input
+                                  value={email.editSubject}
+                                  onChange={(e) => {
+                                    const updated = [...bulkEmails];
+                                    updated[idx].editSubject = e.target.value;
+                                    setBulkEmails(updated);
+                                  }}
+                                  className="w-full text-xs text-gray-900 border border-blue-400 rounded px-2 py-1 outline-none focus:ring-1 focus:ring-blue-300"
+                                />
+                              ) : (
+                                <p className="text-xs text-gray-800 truncate max-w-xs">{email.editSubject || email.subject}</p>
+                              )}
+                            </td>
+                            <td className="px-4 py-3">
+                              {email.isFallback ? (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 border border-amber-200 font-medium">Template</span>
+                              ) : (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200 font-medium">AI</span>
+                              )}
+                            </td>
+                            <td className="px-4 py-3">
+                              <button
+                                onClick={() => setPreviewIndex(idx)}
+                                className="p-1.5 rounded hover:bg-blue-50 text-gray-500 hover:text-blue-600 transition-colors"
+                                title="View & edit full email"
+                              >
+                                <Edit3 size={13} />
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* Action bar */}
+                <div className="flex gap-3 mt-3 flex-shrink-0">
+                  <button
+                    onClick={sendTestEmail}
+                    disabled={isSendingBulk || isGenerating}
+                    className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                  >
+                    <Mail size={14} /> Send Test
+                  </button>
+                  <button
+                    onClick={sendBulkEmails}
+                    disabled={isSendingBulk || isGenerating}
+                    className="flex-1 py-2.5 rounded-lg text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center gap-2"
+                  >
+                    {isSendingBulk
+                      ? <><Loader2 size={15} className="animate-spin" /> Sending…</>
+                      : isGenerating
+                      ? <><Loader2 size={15} className="animate-spin" /> Generating {bulkEmails.length}/{selectedLeadIds.size}…</>
+                      : <><Send size={15} /> Send All {bulkEmails.length} Emails</>
+                    }
+                  </button>
+                </div>
+
+                {/* Full email edit modal */}
+                {previewIndex >= 0 && bulkEmails[previewIndex] && (
+                  <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={() => setPreviewIndex(-1)}>
+                    <div className="absolute inset-0 bg-black/30" />
+                    <div
+                      className="relative bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[90vh] flex flex-col overflow-hidden mx-4"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {/* Modal header */}
+                      <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200">
+                        <div>
+                          <p className="text-sm font-bold text-gray-900">{bulkEmails[previewIndex].company_name}</p>
+                          <p className="text-xs text-gray-500">{bulkEmails[previewIndex].lead_email}</p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-gray-400">{previewIndex + 1} / {bulkEmails.length}</span>
+                          <button
+                            onClick={() => setPreviewIndex(Math.max(0, previewIndex - 1))}
+                            disabled={previewIndex === 0}
+                            className="p-1.5 rounded hover:bg-gray-100 disabled:opacity-30"
+                          >
+                            <ChevronLeft size={15} />
+                          </button>
+                          <button
+                            onClick={() => setPreviewIndex(Math.min(bulkEmails.length - 1, previewIndex + 1))}
+                            disabled={previewIndex === bulkEmails.length - 1}
+                            className="p-1.5 rounded hover:bg-gray-100 disabled:opacity-30"
+                          >
+                            <ChevronRight size={15} />
+                          </button>
+                          <button onClick={() => setPreviewIndex(-1)} className="p-1.5 rounded hover:bg-gray-100 ml-1">
+                            <X size={16} className="text-gray-500" />
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Modal body */}
+                      <div className="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
+                        <div>
+                          <label className="block text-xs font-semibold text-gray-700 mb-1.5">Subject</label>
+                          <input
+                            value={bulkEmails[previewIndex].editSubject}
+                            onChange={(e) => {
+                              const updated = [...bulkEmails];
+                              updated[previewIndex].editSubject = e.target.value;
+                              setBulkEmails(updated);
+                            }}
+                            className="w-full px-3 py-2.5 rounded-lg text-sm font-semibold text-gray-900 border border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-100 outline-none"
+                          />
+                        </div>
+                        <div className="flex-1">
+                          <label className="block text-xs font-semibold text-gray-700 mb-1.5">Body</label>
+                          <textarea
+                            value={bulkEmails[previewIndex].editBody}
+                            onChange={(e) => {
+                              const updated = [...bulkEmails];
+                              updated[previewIndex].editBody = e.target.value;
+                              setBulkEmails(updated);
+                            }}
+                            rows={16}
+                            className="w-full px-3 py-2.5 rounded-lg text-sm text-gray-900 border border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-100 outline-none resize-none font-sans leading-relaxed"
+                          />
+                        </div>
+                      </div>
+
+                      {/* Modal footer */}
+                      <div className="px-5 py-3 border-t border-gray-200 flex justify-end gap-2">
+                        <button
+                          onClick={() => setPreviewIndex(-1)}
+                          className="px-4 py-2 rounded-lg text-sm font-medium border border-gray-300 text-gray-700 hover:bg-gray-50"
+                        >
+                          Done
+                        </button>
+                        {previewIndex < bulkEmails.length - 1 && (
+                          <button
+                            onClick={() => setPreviewIndex(previewIndex + 1)}
+                            className="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700"
+                          >
+                            Next →
+                          </button>
+                        )}
                       </div>
                     </div>
                   </div>
-                  <div className="px-4 py-3 border-b border-gray-100">
-                    <p className="text-[10px] uppercase tracking-widest text-gray-400 mb-1">Subject</p>
-                    {bulkEmails[previewIndex]?.isEditing ? (
-                      <input 
-                        value={bulkEmails[previewIndex]?.editSubject || ''} 
-                        onChange={(e) => {
-                          const updated = [...bulkEmails];
-                          updated[previewIndex].editSubject = e.target.value;
-                          setBulkEmails(updated);
-                        }}
-                        className="w-full text-sm font-semibold text-gray-900 bg-white border border-blue-400 rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-blue-200" 
-                      />
-                    ) : (
-                      <p className="text-sm font-semibold text-gray-900">{bulkEmails[previewIndex]?.editSubject || bulkEmails[previewIndex]?.subject}</p>
-                    )}
-                  </div>
-                  <div className="px-4 py-3">
-                    <p className="text-[10px] uppercase tracking-widest text-gray-400 mb-2">Body</p>
-                    {bulkEmails[previewIndex]?.isEditing ? (
-                      <textarea 
-                        value={bulkEmails[previewIndex]?.editBody || ''} 
-                        onChange={(e) => {
-                          const updated = [...bulkEmails];
-                          updated[previewIndex].editBody = e.target.value;
-                          setBulkEmails(updated);
-                        }}
-                        rows={12}
-                        className="w-full text-sm text-gray-900 bg-white border border-blue-400 rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-blue-200 font-sans leading-relaxed resize-none"
-                      />
-                    ) : (
-                      <pre className="text-sm text-gray-700 whitespace-pre-wrap font-sans leading-relaxed max-h-64 overflow-y-auto">{bulkEmails[previewIndex]?.editBody || bulkEmails[previewIndex]?.body}</pre>
-                    )}
-                  </div>
-                </div>
-
-                <div className="flex gap-3">
-                  <button onClick={sendTestEmail} disabled={isSendingBulk}
-                    className="flex-1 py-3 rounded-xl text-sm font-semibold border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 transition-all disabled:opacity-50 flex items-center justify-center gap-2">
-                    <Mail size={15} /> Send Test
-                  </button>
-                  <button onClick={sendBulkEmails} disabled={isSendingBulk}
-                    className="flex-1 py-3 rounded-xl text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 transition-all disabled:opacity-50 flex items-center justify-center gap-2">
-                    {isSendingBulk ? <><Loader2 size={15} className="animate-spin" /> Sending…</> : <><Send size={15} /> Send All {bulkEmails.length}</>}
-                  </button>
-                </div>
+                )}
               </div>
             )}
           </div>
@@ -1029,39 +1188,39 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
             MANUAL COMPOSE MODE
         ══════════════════════════════════════════════════════════════════ */}
         {mode === "manual" && (
-          <div className="p-6 flex flex-col gap-5 max-w-2xl">
-            <div className="rounded-xl p-4 bg-orange-50 border border-orange-200">
-              <p className="text-sm font-semibold text-orange-700">Manual Compose</p>
-              <p className="text-xs mt-1 text-orange-600/80">Write and send to any email address — no lead required. Sent via your configured SMTP account.</p>
+          <div className="p-6 flex flex-col gap-5 w-full max-w-3xl">
+            <div className="rounded-lg p-4 bg-blue-50 border border-blue-200">
+              <p className="text-sm font-semibold text-blue-700">Manual Compose</p>
+              <p className="text-xs mt-1 text-blue-700/80">Write and send to any email address — no lead required. Sent via your configured SMTP account.</p>
             </div>
 
             <div>
-              <label className="block text-xs font-semibold uppercase tracking-widest mb-2 text-gray-500">To</label>
+              <label className="block text-sm font-semibold text-gray-800 mb-2">To</label>
               <div className="relative">
                 <AtSign size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" />
                 <input type="email" value={manualTo} onChange={(e) => setManualTo(e.target.value)}
                   placeholder="recipient@company.com"
-                  className="w-full pl-9 pr-4 py-3 rounded-xl text-sm text-gray-900 border border-gray-300 focus:border-orange-400 focus:ring-2 focus:ring-orange-100 bg-white outline-none transition-all placeholder:text-gray-400" />
+                  className="w-full pl-9 pr-4 py-3 rounded-lg text-sm text-gray-900 border border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-100 bg-white outline-none transition-all placeholder:text-gray-400" />
               </div>
             </div>
 
             <div>
-              <label className="block text-xs font-semibold uppercase tracking-widest mb-2 text-gray-500">Subject</label>
+              <label className="block text-sm font-semibold text-gray-800 mb-2">Subject</label>
               <input type="text" value={manualSubject} onChange={(e) => setManualSubject(e.target.value)}
                 placeholder="e.g. Quick question about your business"
-                className="w-full px-4 py-3 rounded-xl text-sm text-gray-900 border border-gray-300 focus:border-orange-400 focus:ring-2 focus:ring-orange-100 bg-white outline-none transition-all placeholder:text-gray-400" />
+                className="w-full px-4 py-3 rounded-lg text-sm text-gray-900 border border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-100 bg-white outline-none transition-all placeholder:text-gray-400" />
             </div>
 
             <div>
-              <label className="block text-xs font-semibold uppercase tracking-widest mb-2 text-gray-500">Body</label>
+              <label className="block text-sm font-semibold text-gray-800 mb-2">Body</label>
               <textarea value={manualBody} onChange={(e) => setManualBody(e.target.value)} rows={14}
                 placeholder={"Hi,\n\nWrite your email here...\n\nBest,\nYour Name"}
-                className="w-full px-4 py-3 rounded-xl text-sm text-gray-900 border border-gray-300 focus:border-orange-400 focus:ring-2 focus:ring-orange-100 bg-white outline-none transition-all resize-none placeholder:text-gray-400"
+                className="w-full px-4 py-3 rounded-lg text-sm text-gray-900 border border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-100 bg-white outline-none transition-all resize-none placeholder:text-gray-400"
                 style={{ lineHeight: "1.7" }} />
             </div>
 
             <button onClick={sendManualCompose} disabled={isSendingManual || !manualTo || !manualSubject || !manualBody}
-              className="w-full py-4 rounded-xl text-sm font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 text-white bg-orange-500 hover:bg-orange-600">
+              className="w-full py-4 rounded-lg text-sm font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 text-white bg-blue-600 hover:bg-blue-700">
               {isSendingManual
                 ? <><Loader2 size={16} className="animate-spin" /> Sending…</>
                 : <><Send size={16} /> Send Email</>}

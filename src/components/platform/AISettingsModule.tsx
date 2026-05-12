@@ -25,7 +25,7 @@ const PROVIDERS = [
   {
     key: "groq",
     name: "Groq",
-    color: "#F5A623",
+    color: "#2563EB",
     models: [
       "llama-3.3-70b-versatile",
       "llama-3.1-8b-instant",
@@ -39,7 +39,7 @@ const PROVIDERS = [
   {
     key: "openai",
     name: "OpenAI",
-    color: "#00E87A",
+    color: "#2563EB",
     models: ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"],
     icon: "◎",
     tagline: "Most capable models",
@@ -47,7 +47,7 @@ const PROVIDERS = [
   {
     key: "anthropic",
     name: "Anthropic",
-    color: "#00D4FF",
+    color: "#2563EB",
     models: [
       "claude-3-5-sonnet-20241022",
       "claude-3-5-haiku-20241022",
@@ -61,7 +61,7 @@ const PROVIDERS = [
   {
     key: "gemini",
     name: "Google Gemini",
-    color: "#9B6DFF",
+    color: "#2563EB",
     models: ["gemini-1.5-pro", "gemini-1.5-flash", "gemini-pro"],
     icon: "◆",
     tagline: "Multimodal intelligence",
@@ -69,7 +69,7 @@ const PROVIDERS = [
   {
     key: "mistral",
     name: "Mistral AI",
-    color: "#FF4D6D",
+    color: "#2563EB",
     models: ["mistral-large", "mistral-medium", "mistral-small", "open-mixtral-8x7b"],
     icon: "▲",
     tagline: "European open AI",
@@ -214,31 +214,28 @@ export default function AISettingsModule({ userId }: AISettingsProps) {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-full">
-        <Loader2 size={24} className="animate-spin" style={{ color: "#00D4FF" }} />
+        <Loader2 size={24} className="animate-spin text-blue-600" />
       </div>
     );
   }
 
   return (
-    <div className="p-6 flex flex-col gap-6">
+    <div className="p-6 flex flex-col gap-6 bg-white h-full">
       {/* Active Model Banner */}
       {activeProvider && (
-        <div
-          className="rounded-xl p-4 flex items-center justify-between"
-          style={{ background: "rgba(0,212,255,0.05)", border: "1px solid rgba(0,212,255,0.2)" }}
-        >
+        <div className="rounded-xl p-4 flex items-center justify-between bg-blue-50 border border-blue-200">
           <div>
-            <p className="text-[10px] uppercase tracking-widest mb-1" style={{ color: "#555", fontFamily: "JetBrains Mono, monospace" }}>
+            <p className="text-[10px] uppercase tracking-widest mb-1 text-gray-500 font-semibold">
               Active Generation Model
             </p>
             <div className="flex items-center gap-2">
               <div className="status-dot-green" />
-              <span className="text-sm font-semibold" style={{ color: "#00D4FF", fontFamily: "JetBrains Mono, monospace" }}>
+              <span className="text-sm font-semibold text-blue-700 font-mono">
                 {activeProvider}/{activeModel}
               </span>
             </div>
           </div>
-          <Zap size={20} style={{ color: "#00D4FF" }} />
+          <Zap size={20} className="text-blue-600" />
         </div>
       )}
 
@@ -255,29 +252,23 @@ export default function AISettingsModule({ userId }: AISettingsProps) {
           return (
             <div
               key={provider.key}
-              className="rounded-xl p-4 flex flex-col gap-4 transition-all"
-              style={{
-                background: isActive ? `rgba(${hexToRgb(provider.color)}, 0.05)` : "rgba(16,19,26,0.8)",
-                border: `1px solid ${isActive ? provider.color + "44" : "#2A2D35"}`,
-                boxShadow: isActive ? `0 0 20px ${provider.color}15` : undefined,
-              }}
+              className={`rounded-xl p-4 flex flex-col gap-4 border transition-all ${
+                isActive
+                  ? "bg-blue-50 border-blue-300"
+                  : "bg-white border-gray-200 hover:border-gray-300"
+              }`}
             >
               {/* Header */}
               <div className="flex items-start justify-between">
                 <div className="flex items-center gap-3">
-                  <div
-                    className="w-10 h-10 rounded-xl flex items-center justify-center text-lg"
-                    style={{ background: `rgba(${hexToRgb(provider.color)}, 0.1)`, border: `1px solid ${provider.color}33` }}
-                  >
+                  <div className={`w-10 h-10 rounded-xl flex items-center justify-center text-lg border ${
+                    isActive ? "bg-blue-100 border-blue-200" : "bg-gray-100 border-gray-200"
+                  }`}>
                     {provider.icon}
                   </div>
                   <div>
-                    <p className="text-sm font-bold" style={{ color: "#e8eaed", fontFamily: "Syne, sans-serif" }}>
-                      {provider.name}
-                    </p>
-                    <p className="text-[10px]" style={{ color: "#555", fontFamily: "Space Grotesk, sans-serif" }}>
-                      {provider.tagline}
-                    </p>
+                    <p className="text-sm font-bold text-gray-900">{provider.name}</p>
+                    <p className="text-[10px] text-gray-500">{provider.tagline}</p>
                   </div>
                 </div>
 
@@ -287,24 +278,18 @@ export default function AISettingsModule({ userId }: AISettingsProps) {
                     isConnected ? (
                       <div className="flex items-center gap-1">
                         <div className="status-dot-green" style={{ width: 6, height: 6 }} />
-                        <span className="text-[9px]" style={{ color: "#00E87A", fontFamily: "JetBrains Mono, monospace" }}>
-                          LIVE
-                        </span>
+                        <span className="text-[9px] text-green-700 font-semibold">LIVE</span>
                       </div>
                     ) : (
                       <div className="flex items-center gap-1">
                         <div className="status-dot-amber" style={{ width: 6, height: 6 }} />
-                        <span className="text-[9px]" style={{ color: "#F5A623", fontFamily: "JetBrains Mono, monospace" }}>
-                          UNTESTED
-                        </span>
+                        <span className="text-[9px] text-amber-600 font-semibold">UNTESTED</span>
                       </div>
                     )
                   ) : (
                     <div className="flex items-center gap-1">
                       <div className="status-dot-gray" style={{ width: 6, height: 6 }} />
-                      <span className="text-[9px]" style={{ color: "#444", fontFamily: "JetBrains Mono, monospace" }}>
-                        NO KEY
-                      </span>
+                      <span className="text-[9px] text-gray-400 font-semibold">NO KEY</span>
                     </div>
                   )}
                 </div>
@@ -317,18 +302,11 @@ export default function AISettingsModule({ userId }: AISettingsProps) {
                   placeholder="sk-••••••••••••••••••••"
                   value={keyInputs[provider.key] || ""}
                   onChange={(e) => setKeyInputs((prev) => ({ ...prev, [provider.key]: e.target.value }))}
-                  className="w-full pl-3 pr-9 py-2.5 rounded-lg text-xs outline-none"
-                  style={{
-                    background: "rgba(255,255,255,0.04)",
-                    border: "1px solid #2A2D35",
-                    color: "#E5E7EB",
-                    fontFamily: "JetBrains Mono, monospace",
-                  }}
+                  className="w-full pl-3 pr-9 py-2.5 rounded-lg text-xs outline-none border border-gray-300 bg-white text-gray-900 focus:border-blue-500 focus:ring-2 focus:ring-blue-100 font-mono"
                 />
                 <button
                   onClick={() => setShowKeys((prev) => ({ ...prev, [provider.key]: !prev[provider.key] }))}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2"
-                  style={{ color: "#555" }}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
                 >
                   {showKeys[provider.key] ? <EyeOff size={12} /> : <Eye size={12} />}
                 </button>
@@ -339,30 +317,19 @@ export default function AISettingsModule({ userId }: AISettingsProps) {
                 <div className="relative">
                   <button
                     onClick={() => setModelDropdownOpen(modelDropdownOpen === provider.key ? null : provider.key)}
-                    className="w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs transition-all"
-                    style={{
-                      background: "rgba(255,255,255,0.03)",
-                      border: "1px solid #2A2D35",
-                      color: setting?.active_model ? "#aaa" : "#555",
-                    }}
+                    className="w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs border border-gray-300 bg-white text-gray-700 hover:border-blue-400 transition-all"
                   >
-                    <span style={{ fontFamily: "JetBrains Mono, monospace" }}>
-                      {setting?.active_model || "Select model..."}
-                    </span>
-                    <ChevronDown size={12} style={{ color: "#555" }} />
+                    <span className="font-mono">{setting?.active_model || "Select model..."}</span>
+                    <ChevronDown size={12} className="text-gray-400" />
                   </button>
 
                   {modelDropdownOpen === provider.key && (
-                    <div
-                      className="absolute top-full mt-1 left-0 right-0 rounded-lg z-10"
-                      style={{ background: "#0F1117", border: "1px solid #2A2D35" }}
-                    >
+                    <div className="absolute top-full mt-1 left-0 right-0 rounded-lg z-10 bg-white border border-gray-200 shadow-lg overflow-hidden">
                       {provider.models.map((model) => (
                         <button
                           key={model}
                           onClick={() => setAsActive(provider.key, model)}
-                          className="w-full text-left px-3 py-2 text-[11px] hover:bg-[#00D4FF08] transition-colors border-b"
-                          style={{ borderColor: "#1A1D24", color: "#aaa", fontFamily: "JetBrains Mono, monospace" }}
+                          className="w-full text-left px-3 py-2 text-[11px] hover:bg-blue-50 transition-colors border-b border-gray-100 text-gray-700 font-mono"
                         >
                           {model}
                         </button>
@@ -377,8 +344,7 @@ export default function AISettingsModule({ userId }: AISettingsProps) {
                 <button
                   onClick={() => saveKey(provider.key)}
                   disabled={isSaving}
-                  className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-[11px] font-medium transition-all"
-                  style={{ background: `rgba(${hexToRgb(provider.color)}, 0.1)`, border: `1px solid ${provider.color}33`, color: provider.color }}
+                  className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-[11px] font-medium bg-blue-600 text-white hover:bg-blue-700 transition-all disabled:opacity-50"
                 >
                   {isSaving ? <Loader2 size={11} className="animate-spin" /> : <Save size={11} />}
                   Save
@@ -386,8 +352,7 @@ export default function AISettingsModule({ userId }: AISettingsProps) {
                 <button
                   onClick={() => testConnection(provider.key)}
                   disabled={isTesting || !hasKey}
-                  className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-[11px] font-medium transition-all disabled:opacity-40"
-                  style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #2A2D35", color: "#777" }}
+                  className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-[11px] font-medium border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 transition-all disabled:opacity-40"
                 >
                   {isTesting ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
                   Test
@@ -395,8 +360,7 @@ export default function AISettingsModule({ userId }: AISettingsProps) {
                 {hasKey && (
                   <button
                     onClick={() => deleteKey(provider.key)}
-                    className="p-2 rounded-lg transition-all"
-                    style={{ background: "rgba(255,77,109,0.08)", border: "1px solid rgba(255,77,109,0.2)", color: "#FF4D6D" }}
+                    className="p-2 rounded-lg border border-red-200 bg-red-50 text-red-600 hover:bg-red-100 transition-all"
                   >
                     <Trash2 size={11} />
                   </button>
@@ -407,12 +371,11 @@ export default function AISettingsModule({ userId }: AISettingsProps) {
               {isConnected && setting?.active_model && (
                 <button
                   onClick={() => setAsActive(provider.key, setting.active_model!)}
-                  className="py-2 rounded-lg text-[11px] font-semibold transition-all"
-                  style={{
-                    background: isActive ? `rgba(${hexToRgb(provider.color)}, 0.15)` : "rgba(255,255,255,0.03)",
-                    border: `1px solid ${isActive ? provider.color + "55" : "#2A2D35"}`,
-                    color: isActive ? provider.color : "#666",
-                  }}
+                  className={`py-2 rounded-lg text-[11px] font-semibold transition-all border ${
+                    isActive
+                      ? "bg-blue-600 text-white border-blue-600"
+                      : "bg-white text-gray-600 border-gray-300 hover:border-blue-400 hover:text-blue-600"
+                  }`}
                 >
                   {isActive ? "✓ Active Model" : "Set as Active"}
                 </button>
@@ -425,8 +388,3 @@ export default function AISettingsModule({ userId }: AISettingsProps) {
   );
 }
 
-function hexToRgb(hex: string): string {
-  const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-  if (!result) return "0,212,255";
-  return `${parseInt(result[1], 16)},${parseInt(result[2], 16)},${parseInt(result[3], 16)}`;
-}

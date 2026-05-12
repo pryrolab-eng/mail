@@ -198,9 +198,9 @@ export default function CampaignsModule({ userId }: CampaignsModuleProps) {
     switch (status) {
       case 'draft': return 'bg-gray-100 text-gray-700';
       case 'scheduled': return 'bg-blue-100 text-blue-700';
-      case 'active': return 'bg-green-100 text-green-700';
-      case 'paused': return 'bg-yellow-100 text-yellow-700';
-      case 'completed': return 'bg-purple-100 text-purple-700';
+      case 'active': return 'bg-blue-600 text-white';
+      case 'paused': return 'bg-gray-200 text-gray-700';
+      case 'completed': return 'bg-gray-100 text-gray-700';
       default: return 'bg-gray-100 text-gray-700';
     }
   };
@@ -322,7 +322,7 @@ export default function CampaignsModule({ userId }: CampaignsModuleProps) {
                             {campaign.status.toUpperCase()}
                           </span>
                           {campaign.niche && (
-                            <span className="px-2.5 py-1 rounded-full text-xs font-medium bg-purple-50 text-purple-700">
+                            <span className="px-2.5 py-1 rounded-full text-xs font-medium bg-blue-50 text-blue-700">
                               {campaign.niche}
                             </span>
                           )}
@@ -392,19 +392,19 @@ export default function CampaignsModule({ userId }: CampaignsModuleProps) {
                       </div>
                       <div>
                         <p className="text-xs text-gray-500 mb-1">Open Rate</p>
-                        <p className="text-lg font-semibold text-green-600">{stats.openRate}%</p>
+                        <p className="text-lg font-semibold text-gray-900">{stats.openRate}%</p>
                       </div>
                       <div>
                         <p className="text-xs text-gray-500 mb-1">Click Rate</p>
-                        <p className="text-lg font-semibold text-blue-600">{stats.clickRate}%</p>
+                        <p className="text-lg font-semibold text-gray-900">{stats.clickRate}%</p>
                       </div>
                       <div>
                         <p className="text-xs text-gray-500 mb-1">Reply Rate</p>
-                        <p className="text-lg font-semibold text-purple-600">{stats.replyRate}%</p>
+                        <p className="text-lg font-semibold text-gray-900">{stats.replyRate}%</p>
                       </div>
                       <div>
                         <p className="text-xs text-gray-500 mb-1">Bounce Rate</p>
-                        <p className="text-lg font-semibold text-red-600">{stats.bounceRate}%</p>
+                        <p className="text-lg font-semibold text-gray-900">{stats.bounceRate}%</p>
                       </div>
                     </div>
                   </div>

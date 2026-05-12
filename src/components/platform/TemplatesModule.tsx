@@ -252,7 +252,7 @@ export default function TemplatesModule({ userId }: TemplatesModuleProps) {
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-semibold text-gray-900 flex items-center gap-2">
-              <FileText size={28} className="text-purple-600" />
+              <FileText size={28} className="text-blue-600" />
               Email Templates
             </h1>
             <p className="text-sm text-gray-500 mt-1">
@@ -261,7 +261,7 @@ export default function TemplatesModule({ userId }: TemplatesModuleProps) {
           </div>
           <button
             onClick={openCreateModal}
-            className="flex items-center gap-2 px-5 py-2.5 bg-purple-600 text-white rounded-lg text-sm font-medium hover:bg-purple-700 transition-colors"
+            className="flex items-center gap-2 px-5 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
           >
             <Plus size={18} />
             New Template
@@ -271,7 +271,7 @@ export default function TemplatesModule({ userId }: TemplatesModuleProps) {
         {/* Stats */}
         <div className="grid grid-cols-3 gap-4 mt-6">
           {[
-            { label: 'Total Templates', value: templates.length, icon: FileText, color: 'purple' },
+            { label: 'Total Templates', value: templates.length, icon: FileText, color: 'blue' },
             { label: 'Default Template', value: templates.filter(t => t.is_default).length, icon: Star, color: 'yellow' },
             { label: 'With Variables', value: templates.filter(t => t.variables.length > 0).length, icon: Tag, color: 'blue' },
           ].map((stat) => {
@@ -300,7 +300,7 @@ export default function TemplatesModule({ userId }: TemplatesModuleProps) {
             <p className="text-gray-500 text-sm mt-1">Create your first email template to save time</p>
             <button
               onClick={openCreateModal}
-              className="mt-4 px-5 py-2.5 bg-purple-600 text-white rounded-lg text-sm font-medium hover:bg-purple-700 transition-colors inline-flex items-center gap-2"
+              className="mt-4 px-5 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors inline-flex items-center gap-2"
             >
               <Plus size={18} />
               Create Template
@@ -323,7 +323,7 @@ export default function TemplatesModule({ userId }: TemplatesModuleProps) {
                         )}
                       </div>
                       <div className="flex items-center gap-2 flex-wrap">
-                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-purple-50 text-purple-600 border border-purple-100">
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-50 text-blue-600 border border-blue-100">
                           {template.tone}
                         </span>
                         {template.niche && (
@@ -418,7 +418,7 @@ export default function TemplatesModule({ userId }: TemplatesModuleProps) {
                   value={templateName}
                   onChange={(e) => setTemplateName(e.target.value)}
                   placeholder="e.g., Cold Outreach - Healthcare"
-                  className="w-full px-4 py-2.5 rounded-lg border border-gray-300 focus:border-purple-400 focus:ring-2 focus:ring-purple-100 outline-none transition-all"
+                  className="w-full px-4 py-2.5 rounded-lg border border-gray-300 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 outline-none transition-all"
                 />
               </div>
 
@@ -428,7 +428,7 @@ export default function TemplatesModule({ userId }: TemplatesModuleProps) {
                   <select
                     value={templateTone}
                     onChange={(e) => setTemplateTone(e.target.value)}
-                    className="w-full px-4 py-2.5 rounded-lg border border-gray-300 focus:border-purple-400 focus:ring-2 focus:ring-purple-100 outline-none transition-all"
+                    className="w-full px-4 py-2.5 rounded-lg border border-gray-300 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 outline-none transition-all"
                   >
                     <option value="Direct">Direct</option>
                     <option value="Aggressive">Aggressive</option>
@@ -444,7 +444,7 @@ export default function TemplatesModule({ userId }: TemplatesModuleProps) {
                     value={templateNiche}
                     onChange={(e) => setTemplateNiche(e.target.value)}
                     placeholder="e.g., Healthcare, SaaS, etc."
-                    className="w-full px-4 py-2.5 rounded-lg border border-gray-300 focus:border-purple-400 focus:ring-2 focus:ring-purple-100 outline-none transition-all"
+                    className="w-full px-4 py-2.5 rounded-lg border border-gray-300 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 outline-none transition-all"
                   />
                 </div>
               </div>
@@ -456,7 +456,7 @@ export default function TemplatesModule({ userId }: TemplatesModuleProps) {
                   value={templateSubject}
                   onChange={(e) => setTemplateSubject(e.target.value)}
                   placeholder="Use {{company_name}}, {{location}}, etc. for personalization"
-                  className="w-full px-4 py-2.5 rounded-lg border border-gray-300 focus:border-purple-400 focus:ring-2 focus:ring-purple-100 outline-none transition-all"
+                  className="w-full px-4 py-2.5 rounded-lg border border-gray-300 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 outline-none transition-all"
                 />
               </div>
 
@@ -467,7 +467,7 @@ export default function TemplatesModule({ userId }: TemplatesModuleProps) {
                   onChange={(e) => setTemplateBody(e.target.value)}
                   placeholder="Use {{company_name}}, {{location}}, {{niche}}, etc. for personalization"
                   rows={12}
-                  className="w-full px-4 py-2.5 rounded-lg border border-gray-300 focus:border-purple-400 focus:ring-2 focus:ring-purple-100 outline-none transition-all resize-none font-mono text-sm"
+                  className="w-full px-4 py-2.5 rounded-lg border border-gray-300 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 outline-none transition-all resize-none font-mono text-sm"
                 />
                 <p className="text-xs text-gray-500 mt-1">
                   💡 Tip: Use {`{{variable_name}}`} for dynamic content. Common variables: company_name, location, niche, your_company, your_service
@@ -480,7 +480,7 @@ export default function TemplatesModule({ userId }: TemplatesModuleProps) {
                   id="isDefault"
                   checked={isDefault}
                   onChange={(e) => setIsDefault(e.target.checked)}
-                  className="w-4 h-4 text-purple-600 border-gray-300 rounded focus:ring-purple-500"
+                  className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
                 />
                 <label htmlFor="isDefault" className="text-sm text-gray-700">
                   Set as default template
@@ -497,7 +497,7 @@ export default function TemplatesModule({ userId }: TemplatesModuleProps) {
                 <button
                   onClick={saveTemplate}
                   disabled={isSaving}
-                  className="flex-1 px-5 py-2.5 bg-purple-600 text-white rounded-lg font-medium hover:bg-purple-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                  className="flex-1 px-5 py-2.5 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                 >
                   {isSaving ? (
                     <>

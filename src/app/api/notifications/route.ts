@@ -35,7 +35,9 @@ export async function GET(request: NextRequest) {
 
   const { data, error: fetchError } = await query;
   if (fetchError) {
-    return NextResponse.json({ error: fetchError.message }, { status: 500 });
+    // Table may not exist yet — return empty instead of 500
+    console.warn('[notifications] fetch error (table may not exist):', fetchError.message);
+    return NextResponse.json({ notifications: [], unreadCount: 0 });
   }
 
   const { count: unreadCount } = await service

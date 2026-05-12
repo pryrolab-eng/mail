@@ -24,12 +24,12 @@ export type LeadStatus =
 
 export const LEAD_STATUSES: { value: LeadStatus; label: string; color: string; bg: string }[] = [
   { value: 'new',        label: 'New',        color: '#2563EB', bg: '#EFF6FF' },
-  { value: 'contacted',  label: 'Contacted',  color: '#F59E0B', bg: '#FEF3C7' },
-  { value: 'opened',     label: 'Opened',     color: '#8B5CF6', bg: '#F3E8FF' },
-  { value: 'clicked',    label: 'Clicked',    color: '#06B6D4', bg: '#ECFEFF' },
-  { value: 'replied',    label: 'Replied',    color: '#10B981', bg: '#D1FAE5' },
-  { value: 'interested', label: 'Interested', color: '#059669', bg: '#D1FAE5' },
-  { value: 'bounced',    label: 'Bounced',    color: '#EF4444', bg: '#FEE2E2' },
+  { value: 'contacted',  label: 'Contacted',  color: '#2563EB', bg: '#EFF6FF' },
+  { value: 'opened',     label: 'Opened',     color: '#2563EB', bg: '#EFF6FF' },
+  { value: 'clicked',    label: 'Clicked',    color: '#2563EB', bg: '#EFF6FF' },
+  { value: 'replied',    label: 'Replied',    color: '#111827', bg: '#F3F4F6' },
+  { value: 'interested', label: 'Interested', color: '#111827', bg: '#F3F4F6' },
+  { value: 'bounced',    label: 'Bounced',    color: '#DC2626', bg: '#FEE2E2' },
   { value: 'failed',     label: 'Failed',     color: '#DC2626', bg: '#FEE2E2' },
 ];
 
