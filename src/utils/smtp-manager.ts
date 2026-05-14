@@ -14,7 +14,8 @@ export interface SMTPAccount {
   sent_today: number;
   last_reset: string;
   status: 'active' | 'paused' | 'error';
-  provider: string; // gmail, outlook, sendgrid, etc.
+  provider: string;
+  sender_name?: string; // Display name shown in "From:" field e.g. "Alice Smith"
 }
 
 export interface EmailTemplate {

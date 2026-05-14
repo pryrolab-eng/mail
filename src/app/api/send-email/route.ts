@@ -9,17 +9,21 @@ import { classifyBounce } from "@/types/platform";
 export const runtime = "nodejs";
 
 /** Inject tracking pixel and wrap links for click tracking */
-function injectTracking(html: string, pixelId: string, baseUrl: string): string {
-  // Add tracking pixel before </body>
-  const pixel = `<img src="${baseUrl}/api/track/open?id=${pixelId}" width="1" height="1" style="display:none" alt="" />`;
-  const tracked = html.includes('</body>')
-    ? html.replace('</body>', `${pixel}</body>`)
-    : html + pixel;
+function injectTracking(body: string, pixelId: string, baseUrl: string): string {
+  // Ensure baseUrl has no trailing slash
+  const base = baseUrl.replace(/\/$/, "");
 
-  // Wrap links for click tracking
+  // 1×1 pixel — path param format matching /api/track/open/[pixelId]
+  const pixelUrl = `${base}/api/track/open/${pixelId}`;
+  const pixel = `<img src="${pixelUrl}" width="1" height="1" style="display:none;border:0;outline:none;" alt="" />`;
+
+  // Append pixel at the end of the body (works for plain text and HTML)
+  const tracked = body.trimEnd() + "\n\n" + pixel;
+
+  // Wrap http/https links for click tracking — path param format
   return tracked.replace(
     /href="(https?:\/\/[^"]+)"/gi,
-    (_, url) => `href="${baseUrl}/api/track/click?id=${pixelId}&url=${encodeURIComponent(url)}"`
+    (_, url) => `href="${base}/api/track/click/${pixelId}?url=${encodeURIComponent(url)}"`
   );
 }
 
@@ -158,9 +162,9 @@ export async function POST(request: NextRequest) {
       // Classify the bounce/failure type
       const bounceType = classifyBounce(result.error || '');
 
-      // Log failed email
+      // Log failed email — try full insert first, fallback to minimal
       const serviceSupabase2 = createServiceClient();
-      await serviceSupabase2.from('sent_emails').insert({
+      const failedInsert = await serviceSupabase2.from('sent_emails').insert({
         user_id: user.id,
         lead_id: lead?.id ?? null,
         to_email: to,
@@ -169,7 +173,10 @@ export async function POST(request: NextRequest) {
         sent_at: new Date().toISOString(),
         status: 'failed',
         bounce_reason: result.error,
-      }).catch(() => {});
+      });
+      if (failedInsert.error) {
+        console.error("Failed to log failed email:", failedInsert.error.message);
+      }
 
       // Update lead status to 'failed'
       if (lead?.id) {
@@ -207,26 +214,31 @@ export async function POST(request: NextRequest) {
 
     // Record the sent email with tracking
     const trackingPixelId = randomUUID();
-    const baseUrl = request.headers.get('origin') || process.env.NEXT_PUBLIC_APP_URL || '';
+    // Use NEXT_PUBLIC_APP_URL env var — must be set to your deployed domain
+    // e.g. https://yourapp.vercel.app or http://localhost:3000 for dev
+    const baseUrl = (
+      process.env.NEXT_PUBLIC_APP_URL ||
+      request.headers.get("origin") ||
+      request.headers.get("x-forwarded-host") && `https://${request.headers.get("x-forwarded-host")}` ||
+      "http://localhost:3000"
+    ).replace(/\/$/, "");
+
     const trackedBody = injectTracking(emailBody, trackingPixelId, baseUrl);
 
-    const insertData: any = {
+    // Build insert — use service client so RLS doesn't block it
+    const insertData: Record<string, any> = {
       user_id: user.id,
-      lead_id: lead?.id ?? null,   // only set if lead was found in DB
+      lead_id: lead?.id ?? null,
       to_email: to,
       subject,
       body: trackedBody,
       sent_at: new Date().toISOString(),
       status: "sent",
       tracking_pixel_id: trackingPixelId,
-      smtp_account_id: smtpAccountId,
     };
-    
-    // Only add campaign_id if provided
-    if (campaignId) {
-      insertData.campaign_id = campaignId;
-    }
-    
+    if (smtpAccountId) insertData.smtp_account_id = smtpAccountId;
+    if (campaignId) insertData.campaign_id = campaignId;
+
     const { data: sentEmail, error: insertError } = await serviceSupabase
       .from("sent_emails")
       .insert(insertData)
@@ -234,29 +246,16 @@ export async function POST(request: NextRequest) {
       .single();
 
     if (insertError) {
-      // Email was sent but we failed to log it — this is a problem
-      console.error("Failed to log sent email:", insertError);
-      console.error("Insert error details:", {
-        message: insertError.message,
-        code: insertError.code,
-        details: insertError.details,
-        hint: insertError.hint
-      });
-      
-      // Return error to user so they know the email was sent but not tracked
+      console.error("❌ Failed to log sent email:", insertError.message, insertError.hint);
+      // Email was sent — return success but warn
       return NextResponse.json({
         success: true,
-        warning: "Email sent but failed to record in database: " + insertError.message,
+        warning: `Email sent to ${to} but not recorded. Run FIX_FOLLOWUP_AND_SENT_EMAILS.sql in Supabase.`,
         accountUsed: result.accountUsed,
       } satisfies SendEmailResponse);
     }
 
-    console.log("✓ Email sent and recorded successfully:", {
-      sentEmailId: sentEmail?.id,
-      to,
-      subject,
-      accountUsed: result.accountUsed
-    });
+    console.log("✓ Email sent and recorded:", { sentEmailId: sentEmail?.id, to });
 
     // Update lead status to "contacted" — always, regardless of current status
     const leadToUpdate = lead ?? await (async () => {

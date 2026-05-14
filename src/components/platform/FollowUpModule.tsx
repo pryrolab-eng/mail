@@ -39,22 +39,42 @@ export default function FollowUpModule({ userId }: FollowUpModuleProps) {
     setLoading(true);
     try {
       const [sentRes, repliesRes, aiRes] = await Promise.all([
-        supabase.from("sent_emails").select("*").eq("user_id", userId).order("sent_at", { ascending: false }).limit(100),
-        supabase.from("email_replies").select("*").eq("user_id", userId).order("received_at", { ascending: false }),
-        supabase.from("ai_replies").select("*").eq("user_id", userId).order("created_at", { ascending: false }),
+        supabase
+          .from("sent_emails")
+          .select("*")
+          .eq("user_id", userId)
+          .order("sent_at", { ascending: false })
+          .limit(200),
+        supabase
+          .from("email_replies")
+          .select("*")
+          .eq("user_id", userId)
+          .order("received_at", { ascending: false }),
+        supabase
+          .from("ai_replies")
+          .select("*")
+          .eq("user_id", userId)
+          .order("created_at", { ascending: false }),
       ]);
-      
+
+      if (sentRes.error) console.error("sent_emails fetch error:", sentRes.error);
+      if (repliesRes.error) console.error("email_replies fetch error:", repliesRes.error);
+      if (aiRes.error) console.error("ai_replies fetch error:", aiRes.error);
+
       if (sentRes.data) setSentEmails(sentRes.data as SentEmail[]);
       if (repliesRes.data) setEmailReplies(repliesRes.data as EmailReply[]);
       if (aiRes.data) setAIReplies(aiRes.data as AIReply[]);
-      
-      const leadIds = new Set<string>([
-        ...(sentRes.data?.map((e: any) => e.lead_id) || []),
-        ...(repliesRes.data?.map((r: any) => r.lead_id) || []),
-      ]);
-      
+
+      // Load leads for any lead_id that appears in sent emails or replies
+      const leadIds = new Set<string>();
+      sentRes.data?.forEach((e: any) => { if (e.lead_id) leadIds.add(e.lead_id); });
+      repliesRes.data?.forEach((r: any) => { if (r.lead_id) leadIds.add(r.lead_id); });
+
       if (leadIds.size > 0) {
-        const { data: leadsData } = await supabase.from("leads").select("*").in("id", Array.from(leadIds));
+        const { data: leadsData } = await supabase
+          .from("leads")
+          .select("*")
+          .in("id", Array.from(leadIds));
         if (leadsData) {
           const map = new Map<string, Lead>();
           leadsData.forEach((l: Lead) => map.set(l.id, l));
@@ -62,8 +82,8 @@ export default function FollowUpModule({ userId }: FollowUpModuleProps) {
         }
       }
     } catch (error) {
-      console.error("Error fetching data:", error);
-      toast.error("Failed to load data");
+      console.error("Error fetching follow-up data:", error);
+      toast.error("Failed to load follow-up data");
     } finally {
       setLoading(false);
     }
@@ -173,14 +193,15 @@ export default function FollowUpModule({ userId }: FollowUpModuleProps) {
   const sendAIReply = async (aiReplyId: string) => {
     try {
       const aiReply = aiReplies.find((r) => r.id === aiReplyId);
-      if (!aiReply) {
-        toast.error("AI reply not found");
-        return;
-      }
+      if (!aiReply) { toast.error("AI reply not found"); return; }
       
-      const lead = leads.get(aiReply.lead_id);
-      if (!lead?.email) { 
-        toast.error("Lead has no email address"); 
+      // Get recipient email — from lead if linked, otherwise from the original reply
+      const lead = aiReply.lead_id ? leads.get(aiReply.lead_id) : undefined;
+      const originalReply = emailReplies.find((r) => r.id === aiReply.reply_id);
+      const recipientEmail = lead?.email || originalReply?.from_email;
+
+      if (!recipientEmail) { 
+        toast.error("Cannot find recipient email address"); 
         return; 
       }
       
@@ -188,8 +209,8 @@ export default function FollowUpModule({ userId }: FollowUpModuleProps) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ 
-          leadId: aiReply.lead_id, 
-          to: lead.email, 
+          leadId: aiReply.lead_id ?? undefined, 
+          to: recipientEmail, 
           subject: aiReply.subject, 
           body: aiReply.body 
         }),
@@ -229,7 +250,8 @@ export default function FollowUpModule({ userId }: FollowUpModuleProps) {
   };
 
   const stats = {
-    totalSent: sentEmails.length,
+    totalSent: sentEmails.filter(e => e.status === 'sent' || e.status === 'opened' || e.status === 'clicked' || e.status === 'replied').length,
+    totalFailed: sentEmails.filter(e => e.status === 'failed' || e.status === 'bounced').length,
     replied: emailReplies.length,
     positiveReplies: emailReplies.filter((r) => r.is_positive).length,
     aiGenerated: aiReplies.length,
@@ -237,7 +259,7 @@ export default function FollowUpModule({ userId }: FollowUpModuleProps) {
   };
 
   const tabs = [
-    { id: "sent" as const, label: "Sent Emails", count: stats.totalSent },
+    { id: "sent" as const, label: "Sent Emails", count: sentEmails.length },
     { id: "replies" as const, label: "Replies", count: stats.replied },
     { id: "ai-responses" as const, label: "AI Responses", count: stats.aiGenerated },
     { id: "inbox" as const, label: "Inbox Setup", count: null },
@@ -271,13 +293,14 @@ export default function FollowUpModule({ userId }: FollowUpModuleProps) {
         </div>
         
         {/* Stats */}
-        <div className="grid grid-cols-5 gap-3">
+        <div className="grid grid-cols-6 gap-3">
           {[
-            { label: "Sent", value: stats.totalSent, icon: Send },
-            { label: "Replies", value: stats.replied, icon: MessageSquare },
-            { label: "Positive", value: stats.positiveReplies, icon: ThumbsUp },
-            { label: "AI Generated", value: stats.aiGenerated, icon: Bot },
-            { label: "AI Sent", value: stats.aiSent, icon: Sparkles },
+            { label: "Sent", value: stats.totalSent, icon: Send, color: "text-blue-600" },
+            { label: "Failed", value: stats.totalFailed, icon: Mail, color: stats.totalFailed > 0 ? "text-red-500" : "text-gray-400" },
+            { label: "Replies", value: stats.replied, icon: MessageSquare, color: "text-gray-900" },
+            { label: "Positive", value: stats.positiveReplies, icon: ThumbsUp, color: "text-green-600" },
+            { label: "AI Generated", value: stats.aiGenerated, icon: Bot, color: "text-gray-900" },
+            { label: "AI Sent", value: stats.aiSent, icon: Sparkles, color: "text-gray-900" },
           ].map((s) => {
             const Icon = s.icon;
             return (
@@ -286,7 +309,7 @@ export default function FollowUpModule({ userId }: FollowUpModuleProps) {
                   <Icon size={14} className="text-gray-400" />
                   <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">{s.label}</p>
                 </div>
-                <p className="text-2xl font-semibold text-gray-900">{s.value}</p>
+                <p className={`text-2xl font-semibold ${s.color}`}>{s.value}</p>
               </div>
             );
           })}
@@ -328,14 +351,16 @@ export default function FollowUpModule({ userId }: FollowUpModuleProps) {
                 <p className="text-gray-500 text-sm mt-1">Sent emails will appear here</p>
               </div>
             ) : sentEmails.map((email) => {
-              const lead = leads.get(email.lead_id);
+              const lead = email.lead_id ? leads.get(email.lead_id) : undefined;
+              const displayName = lead?.company_name || email.to_email || "Unknown";
+              const displayEmail = lead?.email || email.to_email || "";
               const hasReply = emailReplies.some((r) => r.sent_email_id === email.id);
               return (
                 <div key={email.id} className="bg-white rounded-lg p-4 border border-gray-200 hover:border-gray-300 transition-colors">
                   <div className="flex items-start justify-between">
                     <div className="flex-1">
                       <div className="flex items-center gap-2 mb-2">
-                        <h3 className="text-sm font-semibold text-gray-900">{lead?.company_name || "Unknown"}</h3>
+                        <h3 className="text-sm font-semibold text-gray-900">{displayName}</h3>
                         {hasReply && (
                           <span className="px-2 py-0.5 bg-green-50 text-green-700 text-xs font-medium rounded">
                             Replied
@@ -352,7 +377,7 @@ export default function FollowUpModule({ userId }: FollowUpModuleProps) {
                       </div>
                       <p className="text-sm text-gray-700 mb-1">{email.subject}</p>
                       <p className="text-xs text-gray-500">
-                        {lead?.email} • {new Date(email.sent_at).toLocaleDateString()} at {new Date(email.sent_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        {displayEmail} • {new Date(email.sent_at).toLocaleDateString()} at {new Date(email.sent_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                         {(email.status === "failed" || email.status === "bounced") && email.bounce_reason && (
                           <span className="block mt-1 text-red-600">
                             ⚠️ {email.bounce_reason}
@@ -379,7 +404,7 @@ export default function FollowUpModule({ userId }: FollowUpModuleProps) {
                 <p className="text-gray-500 text-sm mt-1">Click "Check Inbox" to scan for new replies</p>
               </div>
             ) : emailReplies.map((reply) => {
-              const lead = leads.get(reply.lead_id);
+              const lead = reply.lead_id ? leads.get(reply.lead_id) : undefined;
               const hasAI = aiReplies.some((a) => a.reply_id === reply.id);
               return (
                 <div key={reply.id} className="bg-white rounded-lg p-5 border border-gray-200 hover:border-gray-300 transition-colors">
@@ -447,7 +472,7 @@ export default function FollowUpModule({ userId }: FollowUpModuleProps) {
                 <p className="text-gray-500 text-sm mt-1">Generate responses from the Replies tab</p>
               </div>
             ) : aiReplies.map((aiReply) => {
-              const lead = leads.get(aiReply.lead_id);
+              const lead = aiReply.lead_id ? leads.get(aiReply.lead_id) : undefined;
               const original = emailReplies.find((r) => r.id === aiReply.reply_id);
               return (
                 <div key={aiReply.id} className="bg-white rounded-lg p-5 border border-gray-200 hover:border-gray-300 transition-colors">

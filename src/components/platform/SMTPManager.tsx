@@ -31,6 +31,7 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
     user: "",
     password: "",
     daily_limit: GMAIL_SMTP.limit,
+    sender_name: "",
   });
 
   const supabase = createClient();
@@ -92,7 +93,7 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
       }
 
       // Create new account object matching the database schema
-      const newAccount = {
+      const newAccount: Record<string, any> = {
         user_id: userId,
         email: formData.email,
         host: formData.host,
@@ -106,13 +107,32 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
         last_reset: new Date().toISOString(),
       };
 
+      // Add sender_name if the column exists (added via ADD_SENDER_NAME_COLUMN.sql)
+      const derivedName = formData.sender_name.trim() ||
+        formData.email.split('@')[0]
+          .replace(/[._\-]/g, ' ')
+          .replace(/\b\w/g, (c: string) => c.toUpperCase());
+      newAccount.sender_name = derivedName;
+
       console.log('Inserting SMTP account:', { ...newAccount, password: '***' });
 
       // Insert into Supabase
-      const { data, error } = await supabase
+      let { data, error } = await supabase
         .from('smtp_accounts')
         .insert(newAccount)
         .select();
+
+      // If sender_name column doesn't exist yet, retry without it
+      if (error && (error.message?.includes('sender_name') || error.code === '42703' || (!error.message && !error.code))) {
+        console.warn('sender_name column may not exist — retrying without it. Run ADD_SENDER_NAME_COLUMN.sql to fix.');
+        const { sender_name: _removed, ...accountWithoutSenderName } = newAccount;
+        const retry = await supabase
+          .from('smtp_accounts')
+          .insert(accountWithoutSenderName)
+          .select();
+        data = retry.data;
+        error = retry.error;
+      }
 
       if (error) {
         console.error('Supabase error:', error);
@@ -142,6 +162,7 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
         user: "",
         password: "",
         daily_limit: GMAIL_SMTP.limit,
+        sender_name: "",
       });
 
       await loadAccounts();
@@ -279,6 +300,22 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
                   pattern=".*@gmail\.com$"
                   title="Please enter a valid Gmail address"
                 />
+              </div>
+
+              <div className="md:col-span-2">
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Your Name <span className="text-gray-400 font-normal">(shown in email signature)</span>
+                </label>
+                <input
+                  type="text"
+                  value={formData.sender_name}
+                  onChange={(e) => setFormData({ ...formData, sender_name: e.target.value })}
+                  placeholder="e.g. Alice Smith"
+                  className="w-full px-3 py-2 text-gray-900 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 placeholder:text-gray-400"
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  This name appears in the "Best regards" signature of every email sent from this account
+                </p>
               </div>
 
               <div className="md:col-span-2">
