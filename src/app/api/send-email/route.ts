@@ -5,30 +5,23 @@ import { SMTPManager } from "@/utils/smtp-server";
 import { randomUUID } from "crypto";
 import { classifyBounce } from "@/types/platform";
 
-// nodemailer requires the Node.js runtime (not Edge)
 export const runtime = "nodejs";
 
-/** Inject tracking pixel and wrap links for click tracking */
-function injectTracking(html: string, pixelId: string, baseUrl: string): string {
-  // Add tracking pixel before </body>
-  const pixel = `<img src="${baseUrl}/api/track/open?id=${pixelId}" width="1" height="1" style="display:none" alt="" />`;
-  const tracked = html.includes('</body>')
-    ? html.replace('</body>', `${pixel}</body>`)
-    : html + pixel;
-
-  // Wrap links for click tracking
+function injectTracking(body: string, pixelId: string, baseUrl: string): string {
+  const base = baseUrl.replace(/\/$/, "");
+  const pixel = `<img src="${base}/api/track/open/${pixelId}" width="1" height="1" style="display:none;border:0;" alt="" />`;
+  const tracked = body.trimEnd() + "\n\n" + pixel;
   return tracked.replace(
     /href="(https?:\/\/[^"]+)"/gi,
-    (_, url) => `href="${baseUrl}/api/track/click?id=${pixelId}&url=${encodeURIComponent(url)}"`
+    (_, url) => `href="${base}/api/track/click/${pixelId}?url=${encodeURIComponent(url)}"`
   );
 }
 
 export interface SendEmailRequest {
-  leadId?: string;  // Optional — not required for manual sends
+  leadId?: string;
   to: string;
   subject: string;
   body: string;
-  /** Optional — if provided, the sent email is linked to this campaign */
   campaignId?: string;
 }
 
@@ -43,24 +36,15 @@ export interface SendEmailResponse {
 
 export async function POST(request: NextRequest) {
   try {
-    // Authenticate the request
     const supabase = await createClient();
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
     if (authError || !user) {
-      return NextResponse.json(
-        { success: false, error: "Unauthorized" },
-        { status: 401 }
-      );
+      return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 });
     }
 
     const body = (await request.json()) as SendEmailRequest;
     const { leadId, to, subject, body: emailBody, campaignId } = body;
 
-    // Validate required fields
     if (!to || !subject || !emailBody) {
       return NextResponse.json(
         { success: false, error: "Missing required fields: to, subject, body" },
@@ -68,124 +52,81 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Basic email format check
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(to)) {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
       return NextResponse.json(
-        { success: false, error: "Invalid recipient email address format" },
+        { success: false, error: "Invalid recipient email address" },
         { status: 400 }
       );
     }
-    
-    // Warn about common fake email patterns
-    const domain = to.split('@')[1];
-    const isSuspiciousEmail = 
-      to.startsWith('info@') || 
-      to.startsWith('contact@') || 
-      to.startsWith('hello@') ||
-      to.startsWith('support@');
-    
-    if (isSuspiciousEmail) {
-      console.warn(`⚠️  Sending to potentially generated email: ${to}`);
-      console.warn(`   Domain: ${domain} - This might bounce if the domain doesn't exist`);
-    }
 
-    // If leadId provided, verify the lead belongs to this user
-    const serviceSupabase = createServiceClient();
+    const service = createServiceClient();
+
+    // Look up lead if leadId provided
     let lead: { id: string; company_name: string; status: string } | null = null;
-
     if (leadId) {
-      const { data: leadData, error: leadError } = await serviceSupabase
+      const { data } = await service
         .from("leads")
         .select("id, company_name, status")
         .eq("id", leadId)
         .eq("user_id", user.id)
         .single();
-
-      if (leadError || !leadData) {
-        // Lead not found — log it but don't block the send.
-        // This happens when the lead hasn't been saved to the DB yet
-        // (e.g. sending directly from scraper results before "Add to CRM").
-        console.warn(`[send-email] leadId ${leadId} not found for user ${user.id} — sending without lead link`);
-      } else {
-        lead = leadData;
-      }
+      lead = data ?? null;
     }
 
-    // Load SMTP accounts and send
+    // Load SMTP and check capacity
     const smtpManager = new SMTPManager();
-    
     try {
       await smtpManager.loadAccounts(user.id);
-    } catch (loadError) {
-      console.error('Failed to load SMTP accounts:', loadError);
+    } catch (err) {
+      console.error("loadAccounts failed:", err);
       return NextResponse.json(
-        {
-          success: false,
-          error: "Failed to load SMTP accounts: " + (loadError instanceof Error ? loadError.message : String(loadError)),
-        },
+        { success: false, error: "Failed to load SMTP accounts: " + String(err) },
         { status: 500 }
       );
     }
 
     const capacity = smtpManager.getTotalCapacity();
-    
-    console.log('SMTP capacity:', capacity);
-    
+    console.log("SMTP capacity:", capacity);
+
     if (capacity.total === 0) {
       return NextResponse.json(
-        {
-          success: false,
-          error: "No SMTP accounts configured. Add one in SMTP Manager.",
-        },
+        { success: false, error: "No SMTP accounts configured. Add one in SMTP Manager." },
         { status: 400 }
       );
     }
-    
+
     if (capacity.remaining === 0) {
       return NextResponse.json(
-        {
-          success: false,
-          error: "All SMTP accounts have reached their daily sending limit. Try again tomorrow.",
-        },
+        { success: false, error: "Daily sending limit reached. Try again tomorrow." },
         { status: 429 }
       );
     }
 
+    // Send the email
     const result = await smtpManager.sendEmail(to, subject, emailBody);
 
     if (!result.success) {
-      // Classify the bounce/failure type
-      const bounceType = classifyBounce(result.error || '');
+      // Log failed send — fire and forget, don't crash on DB errors
+      try {
+        await service.from("sent_emails").insert({
+          user_id: user.id,
+          lead_id: lead?.id ?? null,
+          to_email: to,
+          subject,
+          body: emailBody,
+          sent_at: new Date().toISOString(),
+          status: "failed",
+          bounce_reason: result.error ?? null,
+        });
+      } catch { /* non-critical */ }
 
-      // Log failed email
-      const serviceSupabase2 = createServiceClient();
-      await serviceSupabase2.from('sent_emails').insert({
-        user_id: user.id,
-        lead_id: lead?.id ?? null,
-        to_email: to,
-        subject,
-        body: emailBody,
-        sent_at: new Date().toISOString(),
-        status: 'failed',
-        bounce_reason: result.error,
-      }).catch(() => {});
-
-      // Update lead status to 'failed'
       if (lead?.id) {
-        await serviceSupabase2.from('leads')
-          .update({ status: 'failed', updated_at: new Date().toISOString() })
-          .eq('id', lead.id).catch(() => {});
+        try {
+          await service.from("leads")
+            .update({ status: "failed", updated_at: new Date().toISOString() })
+            .eq("id", lead.id);
+        } catch { /* non-critical */ }
       }
-
-      // Create notification
-      await serviceSupabase2.from('notifications').insert({
-        user_id: user.id,
-        type: 'failed_email',
-        title: 'Email Failed to Send',
-        message: `Failed to send to ${to}: ${result.error}`,
-        data: { to, error: result.error, bounceType },
-      }).catch(() => {});
 
       return NextResponse.json(
         { success: false, error: result.error || "Failed to send email" },
@@ -193,97 +134,89 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Look up the smtp_account id from the email address that was used
+    // Get smtp_account id
     let smtpAccountId: string | null = null;
     if (result.accountUsed) {
-      const { data: smtpAccount } = await serviceSupabase
-        .from("smtp_accounts")
-        .select("id")
-        .eq("user_id", user.id)
-        .eq("email", result.accountUsed)
-        .single();
-      smtpAccountId = smtpAccount?.id ?? null;
+      try {
+        const { data } = await service
+          .from("smtp_accounts")
+          .select("id")
+          .eq("user_id", user.id)
+          .eq("email", result.accountUsed)
+          .single();
+        smtpAccountId = data?.id ?? null;
+      } catch { /* non-critical */ }
     }
 
-    // Record the sent email with tracking
+    // Build tracking
     const trackingPixelId = randomUUID();
-    const baseUrl = request.headers.get('origin') || process.env.NEXT_PUBLIC_APP_URL || '';
+    const baseUrl = (
+      process.env.NEXT_PUBLIC_APP_URL ||
+      request.headers.get("origin") ||
+      "http://localhost:3000"
+    ).replace(/\/$/, "");
     const trackedBody = injectTracking(emailBody, trackingPixelId, baseUrl);
 
-    const insertData: any = {
+    // Record sent email
+    const insertData: Record<string, any> = {
       user_id: user.id,
-      lead_id: lead?.id ?? null,   // only set if lead was found in DB
+      lead_id: lead?.id ?? null,
       to_email: to,
       subject,
       body: trackedBody,
       sent_at: new Date().toISOString(),
       status: "sent",
       tracking_pixel_id: trackingPixelId,
-      smtp_account_id: smtpAccountId,
     };
-    
-    // Only add campaign_id if provided
-    if (campaignId) {
-      insertData.campaign_id = campaignId;
-    }
-    
-    const { data: sentEmail, error: insertError } = await serviceSupabase
+    if (smtpAccountId) insertData.smtp_account_id = smtpAccountId;
+    if (campaignId) insertData.campaign_id = campaignId;
+
+    const { data: sentEmail, error: insertError } = await service
       .from("sent_emails")
       .insert(insertData)
       .select("id")
       .single();
 
     if (insertError) {
-      // Email was sent but we failed to log it — this is a problem
-      console.error("Failed to log sent email:", insertError);
-      console.error("Insert error details:", {
-        message: insertError.message,
-        code: insertError.code,
-        details: insertError.details,
-        hint: insertError.hint
-      });
-      
-      // Return error to user so they know the email was sent but not tracked
+      console.error("Failed to log sent email:", insertError.message);
       return NextResponse.json({
         success: true,
-        warning: "Email sent but failed to record in database: " + insertError.message,
+        warning: "Email sent but not recorded. Run FIX_FOLLOWUP_AND_SENT_EMAILS.sql",
         accountUsed: result.accountUsed,
       } satisfies SendEmailResponse);
     }
 
-    console.log("✓ Email sent and recorded successfully:", {
-      sentEmailId: sentEmail?.id,
-      to,
-      subject,
-      accountUsed: result.accountUsed
-    });
+    console.log("✓ Email sent:", { id: sentEmail?.id, to });
 
-    // Update lead status to "contacted" — always, regardless of current status
+    // Update lead status to contacted
     const leadToUpdate = lead ?? await (async () => {
-      const { data } = await serviceSupabase
-        .from("leads")
-        .select("id, status")
-        .eq("user_id", user.id)
-        .eq("email", to)
-        .maybeSingle();
-      return data;
+      try {
+        const { data } = await service
+          .from("leads")
+          .select("id, status")
+          .eq("user_id", user.id)
+          .eq("email", to)
+          .maybeSingle();
+        return data;
+      } catch { return null; }
     })();
 
     if (leadToUpdate) {
-      const prevStatus = leadToUpdate.status;
-      await serviceSupabase
-        .from("leads")
-        .update({ status: "contacted", updated_at: new Date().toISOString(), last_contacted_at: new Date().toISOString() })
-        .eq("id", leadToUpdate.id);
+      try {
+        await service.from("leads").update({
+          status: "contacted",
+          updated_at: new Date().toISOString(),
+          last_contacted_at: new Date().toISOString(),
+        }).eq("id", leadToUpdate.id);
 
-      // Log status history only if status actually changed
-      if (prevStatus !== "contacted") {
-        await serviceSupabase.from("lead_status_history").insert({
-          lead_id: leadToUpdate.id,
-          old_status: prevStatus,
-          new_status: "contacted",
-        }).catch(() => {}); // non-critical
-      }
+        if (leadToUpdate.status !== "contacted") {
+          await service.from("lead_status_history").insert({
+            lead_id: leadToUpdate.id,
+            old_status: leadToUpdate.status,
+            new_status: "contacted",
+          });
+        }
+      } catch { /* non-critical */ }
     }
 
     return NextResponse.json({
@@ -292,13 +225,11 @@ export async function POST(request: NextRequest) {
       accountUsed: result.accountUsed,
       leadId: leadToUpdate?.id ?? null,
     } satisfies SendEmailResponse);
+
   } catch (error) {
-    console.error("[/api/send-email] Unexpected error:", error);
+    console.error("[send-email] Unexpected error:", error);
     return NextResponse.json(
-      {
-        success: false,
-        error: error instanceof Error ? error.message : "Internal server error",
-      },
+      { success: false, error: error instanceof Error ? error.message : "Internal server error" },
       { status: 500 }
     );
   }

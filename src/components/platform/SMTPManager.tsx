@@ -31,6 +31,7 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
     user: "",
     password: "",
     daily_limit: GMAIL_SMTP.limit,
+    sender_name: "",
   });
 
   const supabase = createClient();
@@ -40,30 +41,50 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
   }, [userId]);
 
   const loadAccounts = async () => {
-    const { data, error } = await supabase
+    // Load own accounts + shared accounts
+    const { data: ownData, error: ownError } = await supabase
       .from('smtp_accounts')
       .select('*')
       .eq('user_id', userId)
       .order('created_at', { ascending: false });
 
-    if (error) {
-      console.error('Error loading SMTP accounts:', error);
-      console.error('Error details:', JSON.stringify(error, null, 2));
-      toast.error('Failed to load SMTP accounts: ' + (error.message || 'Unknown error'));
+    const { data: sharedData } = await supabase
+      .from('smtp_accounts')
+      .select('*')
+      .eq('is_shared', true)
+      .order('created_at', { ascending: false });
+
+    if (ownError) {
+      console.error('Error loading SMTP accounts:', ownError);
+      toast.error('Failed to load SMTP accounts');
       return;
     }
 
-    setAccounts(data || []);
+    // Merge — deduplicate by id
+    const all = [...(ownData || []), ...(sharedData || [])];
+    const seen = new Set<string>();
+    const merged = all.filter(a => { if (seen.has(a.id)) return false; seen.add(a.id); return true; });
 
-    // Calculate capacity
-    const totalCapacity = (data || []).reduce((sum: number, acc: any) => sum + acc.daily_limit, 0);
-    const totalUsed = (data || []).reduce((sum: number, acc: any) => sum + (acc.sent_today || 0), 0);
+    setAccounts(merged);
 
-    setCapacity({
-      total: totalCapacity,
-      used: totalUsed,
-      remaining: totalCapacity - totalUsed
-    });
+    const totalCapacity = merged.reduce((sum: number, acc: any) => sum + acc.daily_limit, 0);
+    const totalUsed = merged.reduce((sum: number, acc: any) => sum + (acc.sent_today || 0), 0);
+    setCapacity({ total: totalCapacity, used: totalUsed, remaining: totalCapacity - totalUsed });
+  };
+
+  const toggleShared = async (accountId: string, currentlyShared: boolean) => {
+    const { error } = await supabase
+      .from('smtp_accounts')
+      .update({ is_shared: !currentlyShared })
+      .eq('id', accountId)
+      .eq('user_id', userId);
+
+    if (error) {
+      toast.error('Failed to update sharing');
+      return;
+    }
+    toast.success(currentlyShared ? 'Account is now private' : 'Account is now shared with all users');
+    await loadAccounts();
   };
 
   const handleEmailChange = (email: string) => {
@@ -92,7 +113,7 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
       }
 
       // Create new account object matching the database schema
-      const newAccount = {
+      const newAccount: Record<string, any> = {
         user_id: userId,
         email: formData.email,
         host: formData.host,
@@ -106,13 +127,32 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
         last_reset: new Date().toISOString(),
       };
 
+      // Add sender_name if the column exists (added via ADD_SENDER_NAME_COLUMN.sql)
+      const derivedName = formData.sender_name.trim() ||
+        formData.email.split('@')[0]
+          .replace(/[._\-]/g, ' ')
+          .replace(/\b\w/g, (c: string) => c.toUpperCase());
+      newAccount.sender_name = derivedName;
+
       console.log('Inserting SMTP account:', { ...newAccount, password: '***' });
 
       // Insert into Supabase
-      const { data, error } = await supabase
+      let { data, error } = await supabase
         .from('smtp_accounts')
         .insert(newAccount)
         .select();
+
+      // If sender_name column doesn't exist yet, retry without it
+      if (error && (error.message?.includes('sender_name') || error.code === '42703' || (!error.message && !error.code))) {
+        console.warn('sender_name column may not exist — retrying without it. Run ADD_SENDER_NAME_COLUMN.sql to fix.');
+        const { sender_name: _removed, ...accountWithoutSenderName } = newAccount;
+        const retry = await supabase
+          .from('smtp_accounts')
+          .insert(accountWithoutSenderName)
+          .select();
+        data = retry.data;
+        error = retry.error;
+      }
 
       if (error) {
         console.error('Supabase error:', error);
@@ -142,6 +182,7 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
         user: "",
         password: "",
         daily_limit: GMAIL_SMTP.limit,
+        sender_name: "",
       });
 
       await loadAccounts();
@@ -283,6 +324,22 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
 
               <div className="md:col-span-2">
                 <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Your Name <span className="text-gray-400 font-normal">(shown in email signature)</span>
+                </label>
+                <input
+                  type="text"
+                  value={formData.sender_name}
+                  onChange={(e) => setFormData({ ...formData, sender_name: e.target.value })}
+                  placeholder="e.g. Alice Smith"
+                  className="w-full px-3 py-2 text-gray-900 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 placeholder:text-gray-400"
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  This name appears in the "Best regards" signature of every email sent from this account
+                </p>
+              </div>
+
+              <div className="md:col-span-2">
+                <label className="block text-sm font-medium text-gray-700 mb-1">
                   App Password *
                 </label>
                 <input
@@ -381,9 +438,19 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
                   <div className="flex items-center gap-2">
                     {getStatusIcon(account.status)}
                     <span className="text-sm capitalize">{account.status}</span>
+                    {account.is_shared && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-700 font-semibold">
+                        SHARED
+                      </span>
+                    )}
                   </div>
                 </td>
-                <td className="px-4 py-3 text-sm text-gray-900">{account.email}</td>
+                <td className="px-4 py-3 text-sm text-gray-900">
+                  {account.email}
+                  {account.user_id !== userId && account.is_shared && (
+                    <span className="ml-2 text-[10px] text-gray-400">(shared account)</span>
+                  )}
+                </td>
                 <td className="px-4 py-3 text-sm text-gray-600">{account.provider}</td>
                 <td className="px-4 py-3">
                   <div className="flex items-center gap-2">
@@ -391,7 +458,7 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
                       <div
                         className="bg-blue-600 h-2 rounded-full"
                         style={{
-                          width: `${(account.sent_today / account.daily_limit) * 100}%`,
+                          width: `${Math.min((account.sent_today / account.daily_limit) * 100, 100)}%`,
                         }}
                       />
                     </div>
@@ -400,12 +467,31 @@ export default function SMTPManager({ userId }: SMTPManagerProps) {
                 </td>
                 <td className="px-4 py-3 text-sm text-gray-600">{account.daily_limit}</td>
                 <td className="px-4 py-3">
-                  <button 
-                    onClick={() => handleDeleteAccount(account.id)}
-                    className="text-red-600 hover:text-red-700"
-                  >
-                    <Trash2 size={16} />
-                  </button>
+                  <div className="flex items-center gap-2">
+                    {/* Only allow deleting own accounts */}
+                    {account.user_id === userId && (
+                      <button
+                        onClick={() => handleDeleteAccount(account.id)}
+                        className="text-red-600 hover:text-red-700"
+                        title="Delete account"
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    )}
+                    {account.user_id === userId && (
+                      <button
+                        onClick={() => toggleShared(account.id, account.is_shared)}
+                        className={`text-xs px-2 py-1 rounded border transition-colors ${
+                          account.is_shared
+                            ? 'bg-purple-50 border-purple-200 text-purple-700 hover:bg-purple-100'
+                            : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'
+                        }`}
+                        title={account.is_shared ? 'Make private' : 'Share with all users'}
+                      >
+                        {account.is_shared ? 'Shared' : 'Share'}
+                      </button>
+                    )}
+                  </div>
                 </td>
               </tr>
             ))}

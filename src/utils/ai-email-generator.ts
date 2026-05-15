@@ -12,33 +12,92 @@ interface EmailGenerationParams {
   tone: 'Direct' | 'Aggressive' | 'Surgical';
   customPainPoint?: string;
   userId: string;
+  senderName?: string;   // Real name from SMTP account e.g. "Alice Smith"
+  senderEmail?: string;  // Real email from SMTP account e.g. "alice@gmail.com"
+  senderTitle?: string;  // Optional title e.g. "Executive Sales"
 }
 
-// ── System message — compact, ~150 tokens ────────────────────────────────────
-const SYSTEM_MESSAGE = `You are a B2B sales rep for Pryro, a tech company offering AI automation, workflow optimization, custom software, and digital transformation.
+// ── System message ────────────────────────────────────────────────────────────
+function buildSystemMessage(senderName: string, senderTitle: string): string {
+  return `You are a senior B2B sales executive writing cold outreach emails on behalf of Pryro.
 
-Write professional, personalized cold outreach emails that:
-- Hook with a relevant industry pain point
-- Show how Pryro solves it (AI automation, workflow tools, CRM, software dev)
-- Focus on business outcomes (time saved, efficiency, scale)
-- End with a polite CTA for a 15-min discovery call
-- Sound human and consultative, never robotic or salesy
-- 120–180 words max
+EXACT FORMAT TO FOLLOW — mirror this structure precisely:
 
-CRITICAL FORMATTING RULES:
-- Plain text only. No markdown. No asterisks, no bold, no bullet points, no symbols.
-- Write in proper paragraphs separated by blank lines.
-- Never use ** or * or # or - for formatting.
+---
+[Opening line: one sentence that connects to what the recipient's company does or their industry. No flattery. State a relevant business context or opportunity.]
+
+[Second paragraph: explain what Pryro does and how it directly helps their type of business. Be specific. Mention the core value — replacing manual workflows, Excel-based operations, or fragmented tools with a unified platform. If relevant, mention commission or partnership terms concisely.]
+
+[Third paragraph: one soft, humble CTA — ask for a short meeting (10–15 minutes). Frame it as exploring fit, not selling.]
+
+Best regards,
+${senderName}
+${senderTitle}
+Pryro
+---
+
+SUBJECT LINE RULES:
+- Pick ONE subject from this exact list — choose the most relevant for the recipient:
+  · "Partnership Opportunity with [Company Name] in ERP Solutions"
+  · "Exploring ERP Referral Collaboration with [Company Name]"
+  · "Business Collaboration Opportunity for ERP Services"
+  · "ERP Partnership Proposal for [Company Name]"
+  · "Referral Partnership Opportunity with Pryro ERP"
+  · "Commission-Based ERP Partnership Opportunity"
+  · "ERP Solutions Partnership Discussion"
+  · "Opportunity to Partner with Pryro ERP"
+  · "Strategic ERP Referral Opportunity"
+  · "Potential ERP Collaboration with [Company Name]"
+  · "Partner with Pryro for ERP Referrals"
+  · "ERP Consulting Partnership Opportunity"
+  · "Revenue Partnership Opportunity in ERP"
+  · "10-Minute Discussion on ERP Collaboration"
+  · "ERP Referral Program for Consulting Partners"
+  · "Partnership Discussion: ERP & Business Automation"
+  · "ERP Business Expansion Opportunity"
+  · "Short Discussion on ERP Partnership Opportunities"
+  · "Collaborative ERP Opportunity for [Company Name]"
+  · "Pryro ERP Partnership & Referral Program"
+- Replace [Company Name] with the actual recipient company name
+- Do NOT invent new subject lines — only use from the list above
+- No questions, no clickbait, no symbols, no ALL CAPS, no exclamation marks
+
+BANNED WORDS AND PHRASES (never use any of these):
+- "reach out", "I noticed", "I came across", "I hope this email finds you well",
+  "I wanted to", "just checking in", "touching base", "circle back",
+  "synergy", "leverage", "game-changer", "revolutionary", "cutting-edge",
+  "excited to", "thrilled to", "I am writing to", "please don't hesitate",
+  "feel free to", "at your earliest convenience", "as per", "going forward",
+  "Unlock", "Exploring Synergies"
+
+TONE RULES:
+- Humble but confident — like a professional colleague, not a salesperson
+- Conversational and human — short sentences, plain language
+- Never pushy, never desperate, never overly formal
+- 100–160 words max for the body
+
+ANTI-SPAM RULES:
+- Plain text only. No markdown, no asterisks, no bold, no bullet points.
+- Short paragraphs separated by blank lines.
+- No spam words: free, guarantee, limited time, act now, click here, earn money, no risk, buy now, special offer, urgent, winner.
+- No excessive punctuation (!!!, ???).
+- One CTA only — a short meeting request.
+- The signature MUST be exactly:
+  Best regards,
+  ${senderName}
+  ${senderTitle}
+  Pryro
 
 Respond ONLY in this exact format:
-SUBJECT: [subject line, max 70 chars]
-BODY: [email body in plain text paragraphs]`;
+SUBJECT: [subject line]
+BODY: [email body]`;
+}
 
 // ── Tone additions ────────────────────────────────────────────────────────────
 const TONE_ADDITIONS: Record<string, string> = {
-  Direct:     `Tone: Direct. No filler. State the problem, solution, result, CTA. Max 130 words.`,
-  Aggressive: `Tone: Urgent. Open with a bold industry pain stat. Create FOMO. Binary CTA: "Quick call this week — yes or no?"`,
-  Surgical:   `Tone: Hyper-personalized. Reference their specific context. Sound like an advisor, not a salesperson.`,
+  Direct:   `Tone: Direct and concise. Open with the business context in one sentence. State the value proposition clearly. End with a simple meeting request. No filler words. Max 120 words.`,
+  Aggressive: `Tone: Confident and opportunity-focused. Open with a specific industry challenge or missed opportunity. Make the value proposition impossible to ignore. CTA: ask for a 10-minute call this week. Max 140 words.`,
+  Surgical: `Tone: Hyper-personalized and consultative. Reference their specific industry and business context. Sound like a trusted advisor identifying a gap, not a vendor pitching a product. Max 150 words.`,
 };
 
 // ── Strip markdown from AI output ────────────────────────────────────────────
@@ -54,7 +113,8 @@ function stripMarkdown(text: string): string {
 }
 
 export async function generateAIEmail(params: EmailGenerationParams): Promise<{ subject: string; body: string }> {
-  const { lead, yourCompany, yourService, tone, customPainPoint, userId } = params;
+  const { lead, yourCompany, yourService, tone, customPainPoint, userId,
+          senderName: paramSenderName, senderEmail: paramSenderEmail, senderTitle: paramSenderTitle } = params;
 
   // Fetch active AI provider
   const providerRes = await fetch(`/api/ai-provider?userId=${userId}`);
@@ -68,13 +128,42 @@ export async function generateAIEmail(params: EmailGenerationParams): Promise<{ 
   }
   const aiProvider = await providerRes.json();
 
+  // Fetch sender name from SMTP account if not provided
+  let senderName = paramSenderName || '';
+  let senderTitle = paramSenderTitle || 'Executive Sales';
+
+  if (!senderName) {
+    try {
+      const supabase = (await import("../../supabase/client")).createClient();
+      const { data: smtpAccounts } = await supabase
+        .from('smtp_accounts')
+        .select('email, sender_name')
+        .eq('user_id', userId)
+        .eq('status', 'active')
+        .order('sent_today', { ascending: true })
+        .limit(1);
+
+      if (smtpAccounts && smtpAccounts.length > 0) {
+        const account = smtpAccounts[0];
+        // Use sender_name if set, otherwise derive from email
+        senderName = account.sender_name ||
+          account.email.split('@')[0]
+            .replace(/[._\-]/g, ' ')
+            .replace(/\b\w/g, (c: string) => c.toUpperCase());
+      }
+    } catch {
+      // Fallback — use a generic name
+    }
+  }
+
+  if (!senderName) senderName = 'Sales Team';
+
+  const SYSTEM_MESSAGE = buildSystemMessage(senderName, senderTitle);
+
   // Build compact user prompt
-  const companyContext = lead.company_context
-    ? lead.company_context.slice(0, 300)
-    : "";
+  const companyContext = lead.company_context ? lead.company_context.slice(0, 300) : "";
 
   const userPrompt = `Write a Pryro outreach email.
-Sender: ${yourCompany} — ${yourService}
 Recipient: ${lead.company_name} | ${lead.niche || "Business"} | ${lead.location || ""}${companyContext ? `\nContext: ${companyContext}` : ""}${customPainPoint ? `\nPain point: ${customPainPoint}` : ""}
 ${TONE_ADDITIONS[tone]}`;
 

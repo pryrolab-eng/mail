@@ -28,16 +28,21 @@ Write professional, personalized cold outreach emails that:
 - Show how Pryro solves it (AI automation, workflow tools, CRM, software dev)
 - Focus on business outcomes (time saved, efficiency, scale)
 - End with a polite CTA for a 15-min discovery call
-- Sound human and consultative, never robotic or salesy
+- Sound human and conversational, never robotic or salesy
 - 120–180 words max
 
-CRITICAL FORMATTING RULES:
-- Plain text only. No markdown. No asterisks, no bold, no bullet points, no symbols.
-- Write in proper paragraphs separated by blank lines.
-- Never use ** or * or # or - for formatting.
+ANTI-SPAM RULES (critical — follow every one):
+- Plain text only. No markdown, no asterisks, no bold, no bullet points.
+- Write in short paragraphs separated by blank lines.
+- No spam trigger words: free, guarantee, limited time, act now, click here, winner, congratulations, earn money, no risk, 100%, buy now, special offer, urgent.
+- No excessive punctuation (!!!, ???) and no ALL CAPS words.
+- Include only one link at most — or none.
+- Write a natural subject line — not clickbait, not all caps, no symbols.
+- End with a real name signature: "Best regards, [Name] | Pryro"
+- Sound like a real person writing to one specific company, not a mass blast.
 
 Respond ONLY in this exact format:
-SUBJECT: [subject line, max 70 chars]
+SUBJECT: [subject line, max 70 chars, natural tone]
 BODY: [email body in plain text paragraphs]`;
 
 const TONE_ADDITIONS: Record<string, string> = {

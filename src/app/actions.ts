@@ -602,15 +602,17 @@ export const sendBulkEmailsChunkedAction = async (
     body: string;
   }>,
   options: {
-    chunkSize?: number; // Default 100
-    delayBetweenEmails?: number; // Milliseconds, default 2000
-    verifyEmails?: boolean; // Default true
+    chunkSize?: number;           // Emails per batch — default 10
+    delayBetweenEmails?: number;  // ms between each email — default 45s
+    delayBetweenChunks?: number;  // ms between batches — default 10 min
+    verifyEmails?: boolean;
   } = {}
 ) => {
   try {
-    const chunkSize = options.chunkSize || 100;
-    const delayBetweenEmails = options.delayBetweenEmails || 2000;
-    const verifyEmails = options.verifyEmails !== false;
+    const chunkSize           = options.chunkSize           ?? 10;
+    const delayBetweenEmails  = options.delayBetweenEmails  ?? 45_000;   // 45 seconds
+    const delayBetweenChunks  = options.delayBetweenChunks  ?? 600_000;  // 10 minutes
+    const verifyEmails        = options.verifyEmails !== false;
     
     const supabase = await createClient();
     const smtpManager = new SMTPManager();
@@ -712,11 +714,23 @@ export const sendBulkEmailsChunkedAction = async (
             continue; // Skip — no capacity, don't log as failed
           }
           
+          // Generate a unique tracking pixel ID for open tracking
+          const trackingPixelId = crypto.randomUUID();
+          const appUrl = process.env.NEXT_PUBLIC_APP_URL || process.env.VERCEL_URL
+            ? `https://${process.env.VERCEL_URL}`
+            : 'http://localhost:3000';
+
+          // Inject tracking pixel into email body (1×1 transparent GIF)
+          const trackingPixelHtml = `<img src="${appUrl}/api/track/open/${trackingPixelId}" width="1" height="1" style="display:none" alt="" />`;
+          const trackedBody = email.body.includes('<html')
+            ? email.body.replace('</body>', `${trackingPixelHtml}</body>`)
+            : `${email.body}\n\n${trackingPixelHtml}`;
+
           // Send email using SMTP manager (auto-rotates across 60 accounts)
           const result = await smtpManager.sendEmail(
             email.lead_email,
             email.subject,
-            email.body
+            trackedBody
           );
           
           if (result.success) {
@@ -735,7 +749,7 @@ export const sendBulkEmailsChunkedAction = async (
               smtpAccountId = smtpAccount?.id ?? null;
             }
             
-            // Log to sent_emails (the real tracking table)
+            // Log to sent_emails with tracking pixel ID
             await supabase.from('sent_emails').insert({
               user_id: userId,
               campaign_id: campaignId ?? null,
@@ -746,6 +760,7 @@ export const sendBulkEmailsChunkedAction = async (
               sent_at: new Date().toISOString(),
               status: 'sent',
               smtp_account_id: smtpAccountId,
+              tracking_pixel_id: trackingPixelId,
             });
             
             // Update lead status to 'contacted' (matches kanban column)
@@ -803,10 +818,11 @@ export const sendBulkEmailsChunkedAction = async (
       
       results.chunks.push(chunkResults);
       
-      // Delay between chunks
+      // Pause between chunks — 10 minutes by default to avoid spam filters
       if (i + chunkSize < emails.length) {
-        console.log(`Chunk ${chunkNumber} complete. Waiting 5 seconds before next chunk...`);
-        await new Promise(resolve => setTimeout(resolve, 5000));
+        const waitMin = Math.round(delayBetweenChunks / 60_000);
+        console.log(`Chunk ${chunkNumber}/${totalChunks} complete. Waiting ${waitMin} min before next chunk…`);
+        await new Promise(resolve => setTimeout(resolve, delayBetweenChunks));
       }
     }
     

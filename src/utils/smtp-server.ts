@@ -12,58 +12,86 @@ export class SMTPManager {
   private currentIndex: number = 0;
 
   /**
-   * Load SMTP accounts from database
+   * Load SMTP accounts from database.
+   * Resets daily counters for any account whose last_reset date is before today.
    */
   async loadAccounts(userId: string): Promise<void> {
     const supabase = createServiceClient();
-    
-    const { data, error } = await supabase
+
+    const todayMidnight = new Date();
+    todayMidnight.setHours(0, 0, 0, 0);
+    const todayISO = todayMidnight.toISOString();
+
+    // Reset own accounts with NULL last_reset
+    await supabase
+      .from('smtp_accounts')
+      .update({ sent_today: 0, last_reset: new Date().toISOString(), status: 'active' })
+      .eq('user_id', userId)
+      .is('last_reset', null);
+
+    // Reset own accounts where last_reset is before today midnight
+    await supabase
+      .from('smtp_accounts')
+      .update({ sent_today: 0, last_reset: new Date().toISOString(), status: 'active' })
+      .eq('user_id', userId)
+      .lt('last_reset', todayISO);
+
+    // Reset shared accounts that need resetting
+    await supabase
+      .from('smtp_accounts')
+      .update({ sent_today: 0, last_reset: new Date().toISOString(), status: 'active' })
+      .eq('is_shared', true)
+      .is('last_reset', null);
+
+    await supabase
+      .from('smtp_accounts')
+      .update({ sent_today: 0, last_reset: new Date().toISOString(), status: 'active' })
+      .eq('is_shared', true)
+      .lt('last_reset', todayISO);
+
+    // Load user's own accounts + all shared accounts
+    const { data: ownAccounts, error: ownError } = await supabase
       .from('smtp_accounts')
       .select('*')
       .eq('user_id', userId)
-      .eq('status', 'active')
+      .in('status', ['active', 'error'])
       .order('sent_today', { ascending: true });
 
-    if (error) {
-      console.error('Error loading SMTP accounts:', error);
-      throw new Error('Failed to load SMTP accounts');
+    const { data: sharedAccounts, error: sharedError } = await supabase
+      .from('smtp_accounts')
+      .select('*')
+      .eq('is_shared', true)
+      .in('status', ['active', 'error'])
+      .order('sent_today', { ascending: true });
+
+    if (ownError) {
+      console.error('Error loading own SMTP accounts:', ownError);
+    }
+    if (sharedError) {
+      console.error('Error loading shared SMTP accounts:', sharedError);
     }
 
-    this.accounts = data || [];
-    
-    console.log(`Loaded ${this.accounts.length} SMTP accounts for user ${userId}`);
-    
+    // Merge — deduplicate by id, own accounts take priority
+    const allAccounts = [...(ownAccounts ?? []), ...(sharedAccounts ?? [])];
+    const seen = new Set<string>();
+    this.accounts = allAccounts
+      .filter(a => { if (seen.has(a.id)) return false; seen.add(a.id); return true; })
+      .map(acc => ({ ...acc, status: 'active' as const }));
+
+    const totalSent = this.accounts.reduce((s, a) => s + (a.sent_today || 0), 0);
+    console.log(`Loaded ${this.accounts.length} SMTP accounts (${ownAccounts?.length ?? 0} own + ${sharedAccounts?.length ?? 0} shared) — ${totalSent} sent today`);
+
     if (this.accounts.length === 0) {
-      console.warn('No active SMTP accounts found. Please add SMTP accounts to send emails.');
+      console.warn('No SMTP accounts found. Add one in SMTP Manager or mark an existing one as shared.');
     }
-    
-    // Reset daily counters if needed
-    await this.resetDailyCounters();
   }
 
   /**
-   * Reset daily counters for accounts that haven't been reset today
+   * @deprecated — reset is now handled inside loadAccounts directly in the DB.
+   * Kept for backwards compatibility but does nothing.
    */
   async resetDailyCounters(): Promise<void> {
-    const supabase = createServiceClient();
-    const today = new Date().toISOString().split('T')[0];
-    
-    for (const account of this.accounts) {
-      const lastReset = account.last_reset?.split('T')[0];
-      
-      if (lastReset !== today) {
-        await supabase
-          .from('smtp_accounts')
-          .update({
-            sent_today: 0,
-            last_reset: new Date().toISOString()
-          })
-          .eq('id', account.id);
-        
-        account.sent_today = 0;
-        account.last_reset = new Date().toISOString();
-      }
-    }
+    // No-op — reset is done in loadAccounts via a single DB update
   }
 
   /**
@@ -95,17 +123,19 @@ export class SMTPManager {
    * Create nodemailer transporter for an SMTP account
    */
   createTransporter(account: SMTPAccount) {
+    // user_name is the DB column; fall back to email if missing
+    const authUser = account.user_name || account.user || account.email;
     return nodemailer.createTransport({
       host: account.host,
       port: account.port,
       secure: account.port === 465,
       auth: {
-        user: account.user_name,
+        user: authUser,
         pass: account.password,
       },
-      pool: true, // Use connection pooling
-      maxConnections: 5,
-      maxMessages: 100,
+      connectionTimeout: 10_000,
+      greetingTimeout: 10_000,
+      socketTimeout: 15_000,
     });
   }
 
@@ -131,11 +161,11 @@ export class SMTPManager {
       const transporter = this.createTransporter(account);
       
       await transporter.sendMail({
-        from: `"${account.email.split('@')[0]}" <${account.email}>`,
+        from: `"${account.sender_name || account.email.split('@')[0]}" <${account.email}>`,
         to,
         subject,
         html,
-        text: text || html.replace(/<[^>]*>/g, ''), // Strip HTML for text version
+        text: text || html.replace(/<[^>]*>/g, ''),
       });
 
       // Update sent count
@@ -158,38 +188,31 @@ export class SMTPManager {
       
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       
-      // Only mark account as error for authentication/configuration issues
-      // Don't disable for recipient-specific issues (invalid email, mailbox full, etc.)
-      const isAccountIssue = 
-        errorMessage.toLowerCase().includes('authentication') ||
+      // Only disable the account for clear authentication/config failures.
+      // Recipient errors (550, invalid address, etc.) must NOT disable the account.
+      const isAccountIssue =
         errorMessage.toLowerCase().includes('invalid login') ||
         errorMessage.toLowerCase().includes('invalid credentials') ||
+        errorMessage.toLowerCase().includes('username and password not accepted') ||
+        errorMessage.toLowerCase().includes('authentication failed') ||
         errorMessage.toLowerCase().includes('connection refused') ||
         errorMessage.toLowerCase().includes('econnrefused') ||
-        errorMessage.toLowerCase().includes('smtp server') ||
-        errorMessage.toLowerCase().includes('host not found');
-      
+        errorMessage.toLowerCase().includes('host not found') ||
+        errorMessage.toLowerCase().includes('getaddrinfo');
+
+      const supabase = createServiceClient();
+
       if (isAccountIssue) {
-        // This is an SMTP account configuration problem - disable it
-        console.error(`⚠️  SMTP account ${account.email} has configuration issues - marking as error`);
-        const supabase = createServiceClient();
+        console.error(`⚠️  SMTP account ${account.email} auth/config issue — marking error`);
         await supabase
           .from('smtp_accounts')
-          .update({ 
-            status: 'error',
-            last_error: errorMessage
-          })
+          .update({ status: 'error' })
           .eq('id', account.id);
+        // Remove from in-memory list so we don't retry this account
+        this.accounts = this.accounts.filter(a => a.id !== account.id);
       } else {
-        // This is a recipient-specific issue - keep account active
-        console.warn(`⚠️  Email to recipient failed, but SMTP account ${account.email} is still working`);
-        const supabase = createServiceClient();
-        await supabase
-          .from('smtp_accounts')
-          .update({ 
-            last_error: errorMessage
-          })
-          .eq('id', account.id);
+        // Recipient-specific failure — account is fine, just log it
+        console.warn(`⚠️  Send failed for ${to} (account OK): ${errorMessage}`);
       }
 
       return {
