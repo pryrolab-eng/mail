@@ -9,13 +9,15 @@ export interface SMTPAccount {
   host: string;
   port: number;
   user: string;
+  user_name: string;   // DB column name — same as user, always the email address
   password: string;
   daily_limit: number;
   sent_today: number;
   last_reset: string;
   status: 'active' | 'paused' | 'error';
   provider: string;
-  sender_name?: string; // Display name shown in "From:" field e.g. "Alice Smith"
+  sender_name?: string;
+  last_error?: string;
 }
 
 export interface EmailTemplate {

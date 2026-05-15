@@ -250,8 +250,9 @@ export default function FollowUpModule({ userId }: FollowUpModuleProps) {
   };
 
   const stats = {
-    totalSent: sentEmails.filter(e => e.status === 'sent' || e.status === 'opened' || e.status === 'clicked' || e.status === 'replied').length,
-    totalFailed: sentEmails.filter(e => e.status === 'failed' || e.status === 'bounced').length,
+    totalSent: sentEmails.filter(e => ['sent','opened','clicked','replied','delivered'].includes(e.status ?? '')).length,
+    totalFailed: sentEmails.filter(e => ['failed','bounced'].includes(e.status ?? '')).length,
+    totalAll: sentEmails.length,
     replied: emailReplies.length,
     positiveReplies: emailReplies.filter((r) => r.is_positive).length,
     aiGenerated: aiReplies.length,
@@ -295,6 +296,7 @@ export default function FollowUpModule({ userId }: FollowUpModuleProps) {
         {/* Stats */}
         <div className="grid grid-cols-6 gap-3">
           {[
+            { label: "Total", value: stats.totalAll, icon: Send, color: "text-gray-900" },
             { label: "Sent", value: stats.totalSent, icon: Send, color: "text-blue-600" },
             { label: "Failed", value: stats.totalFailed, icon: Mail, color: stats.totalFailed > 0 ? "text-red-500" : "text-gray-400" },
             { label: "Replies", value: stats.replied, icon: MessageSquare, color: "text-gray-900" },
@@ -352,38 +354,54 @@ export default function FollowUpModule({ userId }: FollowUpModuleProps) {
               </div>
             ) : sentEmails.map((email) => {
               const lead = email.lead_id ? leads.get(email.lead_id) : undefined;
-              const displayName = lead?.company_name || email.to_email || "Unknown";
+              const displayName = lead?.company_name || email.to_email || "Unknown recipient";
               const displayEmail = lead?.email || email.to_email || "";
               const hasReply = emailReplies.some((r) => r.sent_email_id === email.id);
+              const isFailed = email.status === 'failed' || email.status === 'bounced';
+              const isOpened = email.status === 'opened' || !!email.opened_at;
+              const isClicked = email.status === 'clicked' || !!email.clicked_at;
               return (
-                <div key={email.id} className="bg-white rounded-lg p-4 border border-gray-200 hover:border-gray-300 transition-colors">
+                <div key={email.id} className={`bg-white rounded-lg p-4 border transition-colors ${isFailed ? 'border-red-200 hover:border-red-300' : 'border-gray-200 hover:border-gray-300'}`}>
                   <div className="flex items-start justify-between">
                     <div className="flex-1">
-                      <div className="flex items-center gap-2 mb-2">
+                      <div className="flex items-center gap-2 mb-2 flex-wrap">
                         <h3 className="text-sm font-semibold text-gray-900">{displayName}</h3>
                         {hasReply && (
-                          <span className="px-2 py-0.5 bg-green-50 text-green-700 text-xs font-medium rounded">
-                            Replied
-                          </span>
+                          <span className="px-2 py-0.5 bg-green-50 text-green-700 text-xs font-medium rounded">Replied</span>
                         )}
                         <span className={`px-2 py-0.5 text-xs font-medium rounded ${
-                          email.status === "replied" ? "bg-green-50 text-green-700" :
-                          email.status === "opened" ? "bg-yellow-50 text-yellow-700" :
-                          email.status === "failed" || email.status === "bounced" ? "bg-red-50 text-red-700" :
+                          email.status === "replied"  ? "bg-green-50 text-green-700" :
+                          isOpened                    ? "bg-yellow-50 text-yellow-700" :
+                          isClicked                   ? "bg-purple-50 text-purple-700" :
+                          isFailed                    ? "bg-red-50 text-red-700" :
                           "bg-blue-50 text-blue-700"
                         }`}>
-                          {email.status?.toUpperCase()}
+                          {isOpened && !['replied','clicked'].includes(email.status ?? '') ? 'OPENED' :
+                           isClicked ? 'CLICKED' :
+                           (email.status ?? 'sent').toUpperCase()}
                         </span>
                       </div>
-                      <p className="text-sm text-gray-700 mb-1">{email.subject}</p>
+                      <p className="text-sm text-gray-700 mb-1 font-medium">{email.subject}</p>
                       <p className="text-xs text-gray-500">
-                        {displayEmail} • {new Date(email.sent_at).toLocaleDateString()} at {new Date(email.sent_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                        {(email.status === "failed" || email.status === "bounced") && email.bounce_reason && (
-                          <span className="block mt-1 text-red-600">
-                            ⚠️ {email.bounce_reason}
-                          </span>
-                        )}
+                        {displayEmail
+                          ? <>{displayEmail} • </>
+                          : <span className="text-orange-500">⚠ No recipient email — lead had no email address • </span>
+                        }
+                        {new Date(email.sent_at).toLocaleDateString()} at {new Date(email.sent_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                       </p>
+                      {isFailed && email.bounce_reason && (
+                        <p className="text-xs text-red-600 mt-1">⚠ {email.bounce_reason}</p>
+                      )}
+                      {isOpened && email.opened_at && (
+                        <p className="text-xs text-yellow-600 mt-1">
+                          👁 Opened {new Date(email.opened_at).toLocaleDateString()} at {new Date(email.opened_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </p>
+                      )}
+                      {isClicked && email.clicked_at && (
+                        <p className="text-xs text-purple-600 mt-1">
+                          🖱 Clicked {new Date(email.clicked_at).toLocaleDateString()} at {new Date(email.clicked_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </p>
+                      )}
                     </div>
                   </div>
                 </div>

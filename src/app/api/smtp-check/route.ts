@@ -1,45 +1,57 @@
-/**
- * GET /api/smtp-check
- * Returns the SMTP accounts visible to the server (service role).
- * Used to verify that accounts saved from the browser are actually
- * readable server-side before attempting to send emails.
- */
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "../../../../supabase/server";
 import { createServiceClient } from "../../../../supabase/service";
 
-export async function GET() {
-  // Authenticate
-  const supabase = await createClient();
-  const {
-    data: { user },
-    error: authError,
-  } = await supabase.auth.getUser();
+export async function GET(req: NextRequest) {
+  try {
+    // Try auth first
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
 
-  if (authError || !user) {
-    return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 });
+    // If no session, allow passing userId as query param for debugging
+    const userId = user?.id ?? req.nextUrl.searchParams.get("userId");
+
+    if (!userId) {
+      return NextResponse.json({
+        error: "Not logged in. Visit this URL while logged into the dashboard, or add ?userId=YOUR_USER_ID",
+        tip: "Go to /dashboard first, then come back to this URL"
+      }, { status: 401 });
+    }
+
+    const service = createServiceClient();
+
+    const { data: accounts, error } = await service
+      .from("smtp_accounts")
+      .select("id, email, status, sent_today, daily_limit, last_reset, user_name, user_id")
+      .eq("user_id", userId);
+
+    if (error) {
+      return NextResponse.json({ error: error.message, code: error.code }, { status: 500 });
+    }
+
+    const now = new Date();
+    const todayMidnight = new Date();
+    todayMidnight.setHours(0, 0, 0, 0);
+
+    return NextResponse.json({
+      success: true,
+      userId,
+      count: accounts?.length ?? 0,
+      serverTime: now.toISOString(),
+      todayMidnight: todayMidnight.toISOString(),
+      accounts: accounts?.map(a => ({
+        email: a.email,
+        status: a.status,
+        sent_today: a.sent_today,
+        daily_limit: a.daily_limit,
+        remaining: (a.daily_limit ?? 0) - (a.sent_today ?? 0),
+        last_reset: a.last_reset,
+        needs_reset: a.last_reset ? new Date(a.last_reset) < todayMidnight : true,
+        has_user_name: !!a.user_name,
+        user_name_value: a.user_name ?? "(missing)",
+      })),
+    });
+  } catch (e: any) {
+    return NextResponse.json({ error: e.message }, { status: 500 });
   }
-
-  // Read via service role (same path the email sender uses)
-  const service = createServiceClient();
-  const { data, error } = await service
-    .from("smtp_accounts")
-    .select("id, email, provider, status, daily_limit, sent_today, created_at")
-    .eq("user_id", user.id)
-    .eq("status", "active")
-    .order("created_at", { ascending: false });
-
-  if (error) {
-    console.error("[smtp-check] DB error:", error);
-    return NextResponse.json(
-      { success: false, error: error.message },
-      { status: 500 }
-    );
-  }
-
-  return NextResponse.json({
-    success: true,
-    count: data?.length ?? 0,
-    accounts: data ?? [],
-  });
 }
