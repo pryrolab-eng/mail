@@ -44,22 +44,24 @@ SUBJECT LINE RULES:
   · "ERP Partnership Proposal for [Company Name]"
   · "Referral Partnership Opportunity with Pryro ERP"
   · "Commission-Based ERP Partnership Opportunity"
-  · "ERP Solutions Partnership Discussion"
+  · "ERP Solutions Partnership Discussion with [Company Name]"
   · "Opportunity to Partner with Pryro ERP"
-  · "Strategic ERP Referral Opportunity"
+  · "Strategic ERP Referral Opportunity for [Company Name]"
   · "Potential ERP Collaboration with [Company Name]"
   · "Partner with Pryro for ERP Referrals"
-  · "ERP Consulting Partnership Opportunity"
-  · "Revenue Partnership Opportunity in ERP"
+  · "ERP Consulting Partnership Opportunity for [Company Name]"
+  · "Revenue Partnership Opportunity in ERP Solutions"
   · "10-Minute Discussion on ERP Collaboration"
   · "ERP Referral Program for Consulting Partners"
-  · "Partnership Discussion: ERP & Business Automation"
-  · "ERP Business Expansion Opportunity"
+  · "Partnership Discussion: ERP and Business Automation"
+  · "ERP Business Expansion Opportunity for [Company Name]"
   · "Short Discussion on ERP Partnership Opportunities"
   · "Collaborative ERP Opportunity for [Company Name]"
-  · "Pryro ERP Partnership & Referral Program"
+  · "Pryro ERP Partnership and Referral Program"
 - Replace [Company Name] with the actual recipient company name
-- Do NOT invent new subject lines — only use from the list above
+- NEVER invent a new subject line — only use from the list above
+- NEVER use generic subjects like "Streamline Your Operations" or "Quick Question"
+- Subject MUST be 5 to 8 words minimum — count the words before using it
 - No questions, no clickbait, no symbols, no ALL CAPS, no exclamation marks
 
 BANNED WORDS AND PHRASES (never use any of these):
@@ -68,7 +70,16 @@ BANNED WORDS AND PHRASES (never use any of these):
   "synergy", "leverage", "game-changer", "revolutionary", "cutting-edge",
   "excited to", "thrilled to", "I am writing to", "please don't hesitate",
   "feel free to", "at your earliest convenience", "as per", "going forward",
-  "Unlock", "Exploring Synergies"
+  "Unlock", "Exploring Synergies", "Streamline", "I'd love to",
+  "I would love to", "would love to", "Quick question", "Quick Question"
+
+SIGNATURE FORMAT — must be exactly this, no variations:
+Best regards,
+${senderName}
+${senderTitle}
+Pryro
+
+NEVER write the signature as "Best regards, ${senderName} | Pryro" — it must be on separate lines.
 
 TONE RULES:
 - Humble but confident — like a professional colleague, not a salesperson
@@ -82,14 +93,15 @@ ANTI-SPAM RULES:
 - No spam words: free, guarantee, limited time, act now, click here, earn money, no risk, buy now, special offer, urgent, winner.
 - No excessive punctuation (!!!, ???).
 - One CTA only — a short meeting request.
-- The signature MUST be exactly:
+- The signature MUST be on separate lines exactly as:
   Best regards,
   ${senderName}
   ${senderTitle}
   Pryro
+- NEVER write "Best regards, Name | Pryro" on one line — always separate lines.
 
 Respond ONLY in this exact format:
-SUBJECT: [subject line]
+SUBJECT: [subject line — must be from the approved list above, 5-8 words]
 BODY: [email body]`;
 }
 
