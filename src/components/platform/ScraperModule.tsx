@@ -5,8 +5,8 @@ import { ScrapedLead } from "@/types/platform";
 import {
   Radio, Search, MapPin, Plus, Download,
   X, CheckSquare, Square, Loader2, ExternalLink,
-  Mail, Phone, Globe, Upload, FileText, AlertCircle,
-  CheckCircle2, ChevronRight, BarChart2,
+  Mail, Phone, Globe, Upload, FileText,
+  CheckCircle2, BarChart2, Sparkles, Zap,
 } from "lucide-react";
 import { createClient } from "../../../supabase/client";
 import { toast } from "sonner";
@@ -29,11 +29,19 @@ export default function ScraperModule({ userId, onLeadsAdded, onGenerateEmails }
   const [location, setLocation] = useState("");
   const [maxResults, setMaxResults] = useState(100);
   const [isScraping, setIsScraping] = useState(false);
+  const [isScrapeAndGenerate, setIsScrapeAndGenerate] = useState(false);
   const [results, setResults] = useState<ScrapedLead[]>([]);
+  const [generatedEmails, setGeneratedEmails] = useState<any[]>([]);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [drawerLead, setDrawerLead] = useState<ScrapedLead | null>(null);
   const [nicheSuggestions, setNicheSuggestions] = useState<string[]>([]);
   const [addingToCRM, setAddingToCRM] = useState(false);
+
+  // ── Combined pipeline state ───────────────────────────────────────────────
+  const [pipelinePhase, setPipelinePhase] = useState<"idle" | "scraping" | "generating" | "done">("idle");
+  const [pipelineStats, setPipelineStats] = useState<{
+    scraped: number; emails: number; fallbacks: number; total: number;
+  }>({ scraped: 0, emails: 0, fallbacks: 0, total: 0 });
 
   // ── Chunk progress state ──────────────────────────────────────────────────
   const [progress, setProgress] = useState<{
@@ -140,9 +148,9 @@ export default function ScraperModule({ userId, onLeadsAdded, onGenerateEmails }
             setProgress(payload);
           } else if (event === "done") {
             if (payload.total === 0) {
-              toast.info("No leads found. Try a broader niche or different location.");
+              toast.info("No leads with real emails found. Try a broader niche or different location.");
             } else {
-              toast.success(`Found ${payload.total} leads for "${niche}" in "${location}"`);
+              toast.success(`Found ${payload.total} leads with verified emails for "${niche}" in "${location}"`);
             }
           } else if (event === "error") {
             toast.error(payload.message || "Scraping failed.");
@@ -153,6 +161,90 @@ export default function ScraperModule({ userId, onLeadsAdded, onGenerateEmails }
       toast.error("Scraping failed. Please try again.");
     } finally {
       setIsScraping(false);
+    }
+  };
+
+  // ── Scrape + Generate pipeline ────────────────────────────────────────────
+  const handleScrapeAndGenerate = async () => {
+    if (!niche.trim()) { toast.error("Enter a niche (e.g. school, restaurant)"); return; }
+    if (!location.trim()) { toast.error("Enter a location (e.g. Kigali Rwanda)"); return; }
+
+    setIsScrapeAndGenerate(true);
+    setResults([]);
+    setGeneratedEmails([]);
+    setSelected(new Set());
+    setProgress(null);
+    setChunkLog([]);
+    setPipelinePhase("scraping");
+    setPipelineStats({ scraped: 0, emails: 0, fallbacks: 0, total: maxResults });
+
+    try {
+      const res = await fetch("/api/scrape-and-generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          niche: niche.trim(),
+          location: location.trim(),
+          maxResults,
+          yourCompany: "Pryro",
+          yourService: "ERP platform for business automation",
+          tone: "Direct",
+        }),
+      });
+
+      if (!res.ok || !res.body) {
+        const err = await res.json().catch(() => ({}));
+        toast.error(err.error || "Pipeline failed. Please try again.");
+        return;
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() ?? "";
+
+        for (const part of parts) {
+          const eventLine = part.match(/^event:\s*(.+)/m);
+          const dataLine  = part.match(/^data:\s*(.+)/m);
+          if (!eventLine || !dataLine) continue;
+
+          const event = eventLine[1].trim();
+          let payload: any;
+          try { payload = JSON.parse(dataLine[1]); } catch { continue; }
+
+          if (event === "lead") {
+            setResults((prev) => [...prev, payload.lead]);
+            setPipelineStats((s) => ({ ...s, scraped: payload.count }));
+          } else if (event === "scrape_done") {
+            setPipelinePhase("generating");
+            toast.info(`Scraped ${payload.total} leads — generating emails now…`);
+          } else if (event === "email") {
+            setGeneratedEmails((prev) => [...prev, payload.email]);
+            setPipelineStats((s) => ({ ...s, emails: payload.count }));
+          } else if (event === "progress") {
+            if (payload.phase === "generating") {
+              setPipelineStats((s) => ({ ...s, emails: payload.emailCount, fallbacks: payload.failCount }));
+            }
+          } else if (event === "done") {
+            setPipelinePhase("done");
+            toast.success(`✅ ${payload.scraped} leads scraped · ${payload.emails} emails generated`);
+            onLeadsAdded?.();
+          } else if (event === "error") {
+            toast.error(payload.message || "Pipeline failed.");
+          }
+        }
+      }
+    } catch {
+      toast.error("Pipeline failed. Please try again.");
+    } finally {
+      setIsScrapeAndGenerate(false);
     }
   };
 
@@ -527,39 +619,57 @@ export default function ScraperModule({ userId, onLeadsAdded, onGenerateEmails }
             <option value={50}>50 leads</option>
             <option value={100}>100 leads</option>
             <option value={200}>200 leads</option>
+            <option value={300}>300 leads</option>
+            <option value={500}>500 leads</option>
           </select>
 
           {/* Scrape button */}
           <button
             onClick={handleScrape}
-            disabled={isScraping}
-            className="flex items-center gap-2 px-6 py-2.5 rounded-lg text-sm font-semibold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled={isScraping || isScrapeAndGenerate}
+            className="flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-semibold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {isScraping
               ? <><Loader2 size={14} className="animate-spin" />Scraping...</>
               : <><Radio size={14} />Scrape</>
             }
           </button>
+
+          {/* Scrape + Generate button */}
+          <button
+            onClick={handleScrapeAndGenerate}
+            disabled={isScraping || isScrapeAndGenerate}
+            className="flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-semibold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            title="Scrape leads AND generate AI emails in one click"
+          >
+            {isScrapeAndGenerate
+              ? <><Loader2 size={14} className="animate-spin" />{pipelinePhase === "generating" ? "Generating..." : "Scraping..."}</>
+              : <><Zap size={14} />Scrape + AI Emails</>
+            }
+          </button>
         </div>
 
-        {isScraping && (
+        {(isScraping || isScrapeAndGenerate) && (
           <p className="text-xs text-blue-600 mt-3 flex items-center gap-2">
             <Loader2 size={11} className="animate-spin" />
-            {results.length > 0
-              ? `Found ${results.length} leads so far — still scraping…`
-              : "Visiting websites and extracting real emails — leads appear as they're found…"
+            {isScrapeAndGenerate && pipelinePhase === "generating"
+              ? `Generating emails… ${pipelineStats.emails}/${pipelineStats.scraped} done`
+              : results.length > 0
+                ? `Found ${results.length} leads so far — still scraping…`
+                : "Visiting websites and extracting real emails — leads appear as they're found…"
             }
           </p>
         )}
-        {!isScraping && results.length === 0 && (
+        {!isScraping && !isScrapeAndGenerate && results.length === 0 && (
           <p className="text-xs text-gray-400 mt-3">
-            💡 e.g. <strong>school</strong> + <strong>Kigali Rwanda</strong> — scraper visits each website to find real contact emails
+            💡 e.g. <strong>school</strong> + <strong>Kigali Rwanda</strong> — scraper visits each website to find real contact emails.
+            Use <strong>Scrape + AI Emails</strong> to also generate personalised outreach in one click.
           </p>
         )}
       </div>
 
       {/* ── Chunk Progress Panel ─────────────────────────────────────── */}
-      {(isScraping || (progress && results.length > 0)) && (
+      {(isScraping || isScrapeAndGenerate || (progress && results.length > 0)) && (
         <div className="rounded-xl p-4 bg-white border border-blue-200 shadow-sm">
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2">
@@ -615,6 +725,86 @@ export default function ScraperModule({ userId, onLeadsAdded, onGenerateEmails }
                   )}
                   Chunk {c.chunk}
                   {c.status === "done" && <span className="text-gray-400">· {c.leads}</span>}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Pipeline progress panel (Scrape + Generate mode) ─────────── */}
+      {(isScrapeAndGenerate || pipelinePhase === "done") && (
+        <div className="rounded-xl p-4 bg-white border border-blue-200 shadow-sm">
+          <div className="flex items-center gap-2 mb-3">
+            <Zap size={14} className="text-blue-600" />
+            <span className="text-sm font-semibold text-gray-900">Scrape + AI Email Pipeline</span>
+            <span className={`ml-auto text-xs px-2 py-0.5 rounded-full font-medium ${
+              pipelinePhase === "scraping"   ? "bg-blue-100 text-blue-700" :
+              pipelinePhase === "generating" ? "bg-blue-100 text-blue-700" :
+              pipelinePhase === "done"       ? "bg-green-100 text-green-700" :
+              "bg-gray-100 text-gray-500"
+            }`}>
+              {pipelinePhase === "scraping"   ? "Phase 1: Scraping" :
+               pipelinePhase === "generating" ? "Phase 2: Generating Emails" :
+               pipelinePhase === "done"       ? "Complete" : ""}
+            </span>
+          </div>
+
+          {/* Phase indicators */}
+          <div className="flex items-center gap-2 mb-3">
+            <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border ${
+              pipelinePhase === "scraping" ? "bg-blue-50 border-blue-200 text-blue-700" :
+              pipelinePhase !== "idle"     ? "bg-green-50 border-green-200 text-green-700" :
+              "bg-gray-50 border-gray-200 text-gray-400"
+            }`}>
+              {pipelinePhase === "scraping"
+                ? <Loader2 size={10} className="animate-spin" />
+                : <CheckCircle2 size={10} />}
+              Scrape leads
+            </div>
+            <div className="text-gray-300 text-xs">→</div>
+            <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border ${
+              pipelinePhase === "generating" ? "bg-blue-50 border-blue-200 text-blue-700" :
+              pipelinePhase === "done"       ? "bg-green-50 border-green-200 text-green-700" :
+              "bg-gray-50 border-gray-200 text-gray-400"
+            }`}>
+              {pipelinePhase === "generating"
+                ? <Loader2 size={10} className="animate-spin" />
+                : pipelinePhase === "done"
+                  ? <CheckCircle2 size={10} />
+                  : <Sparkles size={10} />}
+              Generate emails
+            </div>
+          </div>
+
+          {/* Stats */}
+          <div className="grid grid-cols-3 gap-2">
+            {[
+              { label: "Leads Scraped", value: pipelineStats.scraped, color: "text-blue-600" },
+              { label: "Emails Generated", value: pipelineStats.emails, color: "text-blue-600" },
+              { label: "Fallbacks", value: pipelineStats.fallbacks, color: "text-orange-500" },
+            ].map((s) => (
+              <div key={s.label} className="bg-gray-50 rounded-lg p-2 border border-gray-100 text-center">
+                <p className="text-[10px] text-gray-400 uppercase tracking-wide mb-0.5">{s.label}</p>
+                <p className={`text-base font-bold ${s.color}`}>{s.value}</p>
+              </div>
+            ))}
+          </div>
+
+          {/* Generated emails list */}
+          {generatedEmails.length > 0 && (
+            <div className="mt-3 max-h-48 overflow-y-auto flex flex-col gap-2">
+              {generatedEmails.map((e, i) => (
+                <div key={i} className={`rounded-lg p-3 border text-xs ${e.isFallback ? "bg-orange-50 border-orange-200" : "bg-blue-50 border-blue-200"}`}>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="font-semibold text-gray-800 truncate">{e.company_name}</span>
+                    {e.isFallback
+                      ? <span className="text-orange-500 text-[10px] shrink-0 ml-2">fallback</span>
+                      : <span className="text-blue-600 text-[10px] shrink-0 ml-2">✓ AI</span>
+                    }
+                  </div>
+                  <p className="text-gray-500 truncate">📧 {e.lead_email}</p>
+                  <p className="text-gray-700 font-medium truncate mt-0.5">Subject: {e.subject}</p>
                 </div>
               ))}
             </div>

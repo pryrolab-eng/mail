@@ -7,10 +7,42 @@ import { classifyBounce } from "@/types/platform";
 
 export const runtime = "nodejs";
 
+/**
+ * Convert plain-text email body to clean HTML.
+ * - Blank lines → paragraph breaks
+ * - Single newlines → line breaks
+ * - Preserves signature formatting
+ */
+function plainTextToHtml(text: string): string {
+  return text
+    .trim()
+    .split(/\n\n+/)                          // split on blank lines → paragraphs
+    .map(para =>
+      `<p style="margin:0 0 14px 0;line-height:1.6;">${
+        para
+          .split('\n')
+          .map(line => line.trim())
+          .join('<br>')
+      }</p>`
+    )
+    .join('\n');
+}
+
 function injectTracking(body: string, pixelId: string, baseUrl: string): string {
   const base = baseUrl.replace(/\/$/, "");
   const pixel = `<img src="${base}/api/track/open/${pixelId}" width="1" height="1" style="display:none;border:0;" alt="" />`;
-  return body.trimEnd() + "\n\n" + pixel;
+
+  // If body is already HTML, append pixel before </body> or at end
+  if (/<html[\s>]/i.test(body)) {
+    return body.replace(/<\/body>/i, `${pixel}</body>`);
+  }
+
+  // Convert plain text to HTML with proper paragraph breaks
+  const html = `<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;font-size:14px;color:#222;max-width:600px;margin:0 auto;padding:20px;">
+${plainTextToHtml(body)}
+${pixel}
+</body></html>`;
+  return html;
 }
 
 export interface SendEmailRequest {
