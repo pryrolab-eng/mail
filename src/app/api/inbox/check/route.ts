@@ -198,16 +198,16 @@ async function matchReplyToSentEmail(
   service: ReturnType<typeof createServiceClient>,
   userId: string,
   parsed: ParsedEmail
-): Promise<string | null> {
+): Promise<{ sentEmailId: string | null; leadId: string | null }> {
   // Strategy 1: match by In-Reply-To header (most reliable)
   if (parsed.inReplyTo) {
     const { data } = await service
       .from("sent_emails")
-      .select("id")
+      .select("id, lead_id")
       .eq("user_id", userId)
       .eq("smtp_message_id", parsed.inReplyTo)
       .single();
-    if (data) return data.id;
+    if (data) return { sentEmailId: data.id, leadId: data.lead_id };
   }
 
   // Strategy 2: match by subject (strip Re:/Fwd: prefixes)
@@ -218,16 +218,41 @@ async function matchReplyToSentEmail(
   if (cleanSubject) {
     const { data } = await service
       .from("sent_emails")
-      .select("id")
+      .select("id, lead_id")
       .eq("user_id", userId)
       .ilike("subject", `%${cleanSubject}%`)
       .order("sent_at", { ascending: false })
       .limit(1)
       .single();
-    if (data) return data.id;
+    if (data) return { sentEmailId: data.id, leadId: data.lead_id };
   }
 
-  return null;
+  // Strategy 3: match by sender email — find a lead with this email address
+  const senderEmail = parsed.from.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/)?.[0]?.toLowerCase();
+  if (senderEmail) {
+    // Check if we sent an email to this address
+    const { data: sentToMatch } = await service
+      .from("sent_emails")
+      .select("id, lead_id")
+      .eq("user_id", userId)
+      .eq("to_email", senderEmail)
+      .order("sent_at", { ascending: false })
+      .limit(1)
+      .single();
+    if (sentToMatch) return { sentEmailId: sentToMatch.id, leadId: sentToMatch.lead_id };
+
+    // Check leads table directly
+    const { data: leadMatch } = await service
+      .from("leads")
+      .select("id")
+      .eq("user_id", userId)
+      .eq("email", senderEmail)
+      .single();
+    if (leadMatch) return { sentEmailId: null, leadId: leadMatch.id };
+  }
+
+  // Strategy 4: save as unmatched reply (still visible in UI)
+  return { sentEmailId: null, leadId: null };
 }
 
 // ─── Process one inbox config ─────────────────────────────────────────────────
@@ -257,25 +282,26 @@ async function processInbox(
 
   for (const parsed of emails) {
     try {
-      // Skip if we already stored this message
+      // Extract sender email for dedup check
+      const senderEmail = parsed.from.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/)?.[0]?.toLowerCase() ?? parsed.from;
+
+      // Skip if we already stored a reply from this sender with this subject
       const { count: existing } = await service
         .from("email_replies")
         .select("id", { count: "exact", head: true })
         .eq("user_id", config.user_id)
-        .eq("from_email", parsed.from);
-      // (A more precise dedup would use message_id — add that column if needed)
+        .eq("from_email", senderEmail)
+        .ilike("subject", `%${parsed.subject.replace(/^(Re|Fwd|FW|RE|FWD):\s*/gi, "").trim()}%`);
+
+      if ((existing ?? 0) > 0) continue; // already stored
 
       // Find the sent_email this is a reply to
-      const sentEmailId = await matchReplyToSentEmail(service, config.user_id, parsed);
-      if (!sentEmailId) continue; // not a reply to one of our emails
+      const { sentEmailId, leadId } = await matchReplyToSentEmail(service, config.user_id, parsed);
 
-      // Get lead_id from sent_email
-      const { data: sentEmail } = await service
-        .from("sent_emails")
-        .select("lead_id")
-        .eq("id", sentEmailId)
-        .single();
-      if (!sentEmail) continue;
+      // Only skip if this email is clearly not related to our outreach
+      // (no sent email match AND no lead match AND subject has no Re: prefix)
+      const hasRePrefix = /^(Re|Fwd|FW|RE|FWD):/i.test(parsed.subject);
+      if (!sentEmailId && !leadId && !hasRePrefix) continue;
 
       const { sentiment, is_positive } = analyzeSentiment(parsed.body);
 
@@ -283,8 +309,8 @@ async function processInbox(
       const { error: insertErr } = await service.from("email_replies").insert({
         user_id: config.user_id,
         sent_email_id: sentEmailId,
-        lead_id: sentEmail.lead_id,
-        from_email: parsed.from,
+        lead_id: leadId,
+        from_email: senderEmail,
         subject: parsed.subject,
         body: parsed.body,
         received_at: parsed.receivedAt.toISOString(),
@@ -297,6 +323,22 @@ async function processInbox(
       if (insertErr) {
         result.errors.push(`Insert reply failed: ${insertErr.message}`);
         continue;
+      }
+
+      // Update sent_email status to "replied"
+      if (sentEmailId) {
+        await service
+          .from("sent_emails")
+          .update({ status: "replied", replied_at: parsed.receivedAt.toISOString() })
+          .eq("id", sentEmailId);
+      }
+
+      // Update lead status to "replied"
+      if (leadId) {
+        await service
+          .from("leads")
+          .update({ status: "replied", updated_at: new Date().toISOString() })
+          .eq("id", leadId);
       }
 
       result.newReplies++;

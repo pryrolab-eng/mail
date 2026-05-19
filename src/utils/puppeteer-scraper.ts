@@ -1,34 +1,22 @@
-﻿/**
- * Lead Scraper — No API keys required.
+﻿import puppeteer, { Browser } from 'puppeteer';
+
+import { guessAndVerifyEmails } from './email-guesser';
+import type { AIProviderConfig } from './ai-scraper-helper';
+
+/**
+ * Lead Scraper — Parallel Google Maps + Website + AI email finding
  *
  * HOW IT WORKS:
- * ─────────────────────────────────────────────────────────────────────────────
- * 1. Google Maps (Puppeteer) — best quality, has phone/address/website
- *    Uses stealth mode + waits for real page load
+ * 1. Google Maps (Puppeteer) — finds businesses with name/address/website.
+ *    Website email fetch runs IN PARALLEL while Maps loads each listing.
+ * 2. Bing Search (HTTP fetch) — extracts emails from search snippets + sites.
+ * 3. DuckDuckGo (HTTP fetch) — additional search source.
+ * 4. Business directories — Yelp, YellowPages, BBB.
+ * 5. AI email extraction — when a website is found but no email is visible,
+ *    AI reads the page content and finds/predicts the real email.
  *
- * 2. Bing Search (HTTP fetch) — no bot detection, returns business listings
- *    Searches: "niche location email contact" → extracts emails from snippets
- *
- * 3. DuckDuckGo (HTTP fetch) — no bot detection
- *    Multiple query variations to find businesses with emails
- *
- * 4. Business directories (HTTP fetch) — Yelp, YellowPages, BBB
- *    Extracts business names + websites, then fetches emails from those sites
- *
- * 5. Email guessing — for businesses with a website but no visible email
- *    Generates info@, contact@, hello@ patterns from the domain
- *
- * WHY THIS GETS MORE RESULTS:
- * - All sources run in parallel
- * - Every business is returned (verified email OR guessed fallback)
- * - No single point of failure — if Maps is blocked, Bing + DDG fill the gap
- * ─────────────────────────────────────────────────────────────────────────────
+ * Only leads with REAL found emails are returned — no guesses.
  */
-
-import puppeteer, { Browser, Page } from 'puppeteer';
-import { guessAndVerifyEmails } from './email-guesser';
-
-// ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface ScrapedLead {
   company_name: string;
@@ -50,12 +38,13 @@ const UA_LIST = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0',
   'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
 ];
-
 const randomUA = () => UA_LIST[Math.floor(Math.random() * UA_LIST.length)];
 
-const BLOCKED_DOMAINS = ['example.com','example.org','sentry.io','wixpress.com',
-  'squarespace.com','wordpress.com','localhost','w3.org','schema.org',
-  'google.com','bing.com','yahoo.com','duckduckgo.com'];
+const BLOCKED_DOMAINS = [
+  'example.com','example.org','sentry.io','wixpress.com','squarespace.com',
+  'wordpress.com','localhost','w3.org','schema.org','google.com','bing.com',
+  'yahoo.com','duckduckgo.com',
+];
 const BLOCKED_PREFIXES = ['noreply','no-reply','donotreply','privacy','test','webmaster'];
 const BLOCKED_SUBSTRINGS = ['.png','.jpg','.jpeg','.gif','@2x','placeholder'];
 
@@ -88,65 +77,145 @@ function bestEmail(emails: string[]): string | null {
   return [...emails].sort((a, b) => scoreEmail(b) - scoreEmail(a))[0];
 }
 
-function guessedEmail(name: string, website?: string | null): string {
-  if (website) {
-    try { return `info@${new URL(website).hostname.replace('www.','')}` } catch {}
-  }
-  return `info@${name.toLowerCase().replace(/[^a-z0-9]/g,'')}.com`;
-}
-
 function delay(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
-// ─── HTTP email fetcher ───────────────────────────────────────────────────────
+// ─── AI email extraction (server-side) ───────────────────────────────────────
 
-async function fetchEmailFromSite(website: string): Promise<string | null> {
+/**
+ * Given website text content, ask AI to find the contact email.
+ * Falls back gracefully if no AI provider is configured.
+ */
+async function aiExtractEmail(
+  companyName: string,
+  domain: string,
+  pageText: string,
+  niche: string,
+  aiProvider: AIProviderConfig | null
+): Promise<string | null> {
+  if (!aiProvider?.api_key) return null;
+
+  const { extractEmailFromContent } = await import('./ai-scraper-helper');
+  try {
+    return await extractEmailFromContent(companyName, pageText, domain, aiProvider);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * When we have a domain but no visible email, ask AI to predict the pattern.
+ */
+async function aiPredictEmail(
+  companyName: string,
+  domain: string,
+  niche: string,
+  location: string,
+  aiProvider: AIProviderConfig | null
+): Promise<string | null> {
+  if (!aiProvider?.api_key) return null;
+
+  const { predictEmailPattern } = await import('./ai-scraper-helper');
+  try {
+    return await predictEmailPattern(companyName, domain, niche, location, aiProvider);
+  } catch {
+    return null;
+  }
+}
+
+// ─── HTTP email fetcher (parallel: contact + about + homepage at once) ────────
+
+/**
+ * Fetch email from a website. Checks /contact, /about, and homepage IN PARALLEL.
+ * Also decodes Cloudflare email obfuscation and [at] patterns.
+ * If no email found in HTML, optionally asks AI to extract from page text.
+ */
+async function fetchEmailFromSite(
+  website: string,
+  companyName = '',
+  niche = '',
+  location = '',
+  aiProvider: AIProviderConfig | null = null
+): Promise<string | null> {
   if (!website.startsWith('http')) website = `https://${website}`;
   let origin = '';
   try { origin = new URL(website).origin; } catch { return null; }
 
-  const urls = [`${origin}/contact`, `${origin}/contact-us`, `${origin}/about`, website];
+  const domain = new URL(origin).hostname.replace('www.', '');
   const headers = { 'User-Agent': randomUA(), 'Accept': 'text/html', 'Accept-Language': 'en-US,en;q=0.9' };
 
-  for (const url of urls) {
+  // Fetch all pages in parallel — don't wait for one before starting the next
+  const urls = [
+    `${origin}/contact`,
+    `${origin}/contact-us`,
+    `${origin}/about`,
+    `${origin}/about-us`,
+    website,
+  ];
+
+  const fetchPage = async (url: string): Promise<string | null> => {
     try {
-      const res = await fetch(url, { headers, signal: AbortSignal.timeout(7_000) });
-      if (!res.ok) continue;
+      const res = await fetch(url, { headers, signal: AbortSignal.timeout(8_000) });
+      if (!res.ok) return null;
       let html = await res.text();
 
       // Decode obfuscation
       html = html
-        .replace(/\s*\[at\]\s*/gi,'@').replace(/\s*\(at\)\s*/gi,'@')
-        .replace(/\s*\[dot\]\s*/gi,'.').replace(/\s*\(dot\)\s*/gi,'.');
+        .replace(/\s*\[at\]\s*/gi, '@').replace(/\s*\(at\)\s*/gi, '@')
+        .replace(/\s*\[dot\]\s*/gi, '.').replace(/\s*\(dot\)\s*/gi, '.');
 
-      // Cloudflare decode
+      // Cloudflare email decode
       const cfRe = /data-cfemail="([0-9a-f]+)"/gi;
       let m: RegExpExecArray | null;
       while ((m = cfRe.exec(html)) !== null) {
-        const bytes = (m[1]??'').match(/.{2}/g)??[];
+        const bytes = (m[1] ?? '').match(/.{2}/g) ?? [];
         if (bytes.length < 2) continue;
-        const key = parseInt(bytes[0]??'0',16);
-        const dec = bytes.slice(1).map((b:string)=>String.fromCharCode(parseInt(b,16)^key)).join('');
+        const key = parseInt(bytes[0] ?? '0', 16);
+        const dec = bytes.slice(1).map((b: string) => String.fromCharCode(parseInt(b, 16) ^ key)).join('');
         if (dec.includes('@')) html += ` ${dec}`;
       }
 
-      // mailto links
+      // mailto: links first (most reliable)
       const mailtos: string[] = [];
       const mr = /mailto:([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})/gi;
       while ((m = mr.exec(html)) !== null) mailtos.push(m[1].toLowerCase());
 
       const found = bestEmail([...mailtos, ...extractEmails(html)]);
       if (found) return found;
-    } catch {}
+
+      // If AI is available and we found no email, try AI extraction on this page
+      if (aiProvider) {
+        const pageText = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 3000);
+        const aiEmail = await aiExtractEmail(companyName, domain, pageText, niche, aiProvider);
+        if (aiEmail) return aiEmail;
+      }
+
+      return null;
+    } catch {
+      return null;
+    }
+  };
+
+  // Run all page fetches in parallel, return first non-null result
+  const results = await Promise.allSettled(urls.map(fetchPage));
+  for (const r of results) {
+    if (r.status === 'fulfilled' && r.value) return r.value;
   }
+
+  // Last resort: AI predicts the email pattern from domain + company info
+  if (aiProvider) {
+    const predicted = await aiPredictEmail(companyName, domain, niche, location, aiProvider);
+    if (predicted) return predicted;
+  }
+
   return null;
 }
 
-// ─── HTTP search helpers ──────────────────────────────────────────────────────
+// ─── HTTP helper ──────────────────────────────────────────────────────────────
 
-async function httpGet(url: string, ua?: string): Promise<string> {
+async function httpGet(url: string): Promise<string> {
   const res = await fetch(url, {
     headers: {
-      'User-Agent': ua ?? randomUA(),
+      'User-Agent': randomUA(),
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       'Accept-Language': 'en-US,en;q=0.9',
     },
@@ -156,24 +225,47 @@ async function httpGet(url: string, ua?: string): Promise<string> {
   return res.text();
 }
 
-// ─── Source 1: Bing Search (no bot detection) ─────────────────────────────────
+// ─── Source 1: Bing Search ────────────────────────────────────────────────────
 
 async function scrapeBing(
   niche: string, location: string, needed: number,
-  seen: Set<string>, onLead: (l: ScrapedLead) => void
+  seen: Set<string>, onLead: (l: ScrapedLead) => void,
+  aiProvider: AIProviderConfig | null
 ): Promise<ScrapedLead[]> {
   const leads: ScrapedLead[] = [];
 
-  const queries = [
-    `${niche} ${location} email contact site:*.com`,
+  // AI-generated queries + hardcoded fallbacks
+  let queries = [
+    `${niche} ${location} email contact`,
     `"${niche}" "${location}" email`,
-    `${niche} company ${location} contact us email`,
-    `list of ${niche} businesses in ${location} email`,
+    `${niche} company ${location} "contact us" email`,
     `${niche} ${location} "@gmail.com" OR "@yahoo.com" OR "@outlook.com"`,
     `${niche} ${location} "contact@" OR "info@" OR "hello@"`,
     `${niche} services ${location} email address`,
     `top ${niche} ${location} website email`,
+    `list of ${niche} businesses in ${location} email`,
+    `${niche} ${location} "sales@" OR "admin@" OR "office@"`,
+    `${niche} ${location} site:yellowpages.com`,
+    `${niche} ${location} site:yelp.com email`,
+    `${niche} ${location} site:hotfrog.com`,
+    `${niche} ${location} "enquiries@" OR "enquiry@"`,
+    `${niche} ${location} contact page email address`,
+    `${niche} near ${location} official website contact`,
   ];
+
+  // Ask AI to generate smarter queries if available
+  if (aiProvider) {
+    try {
+      const { generateSearchQueries } = await import('./ai-scraper-helper');
+      const aiQueries = await generateSearchQueries(niche, location, aiProvider);
+      if (aiQueries.length > 0) {
+        queries = [...aiQueries, ...queries]; // AI queries first
+      }
+    } catch { /* fallback to hardcoded */ }
+  }
+
+  const skipDomains = ['bing.com','microsoft.com','facebook.com','linkedin.com',
+                       'twitter.com','instagram.com','youtube.com','wikipedia.org'];
 
   for (const query of queries) {
     if (leads.length >= needed) break;
@@ -181,84 +273,75 @@ async function scrapeBing(
       console.log(`  🔵 Bing: ${query}`);
       const html = await httpGet(`https://www.bing.com/search?q=${encodeURIComponent(query)}&count=50`);
 
-      // Decode obfuscation in Bing results
       const decoded = html
-        .replace(/\s*\[at\]\s*/gi,'@').replace(/\s*\(at\)\s*/gi,'@')
-        .replace(/\s*\[dot\]\s*/gi,'.').replace(/\s*\(dot\)\s*/gi,'.');
+        .replace(/\s*\[at\]\s*/gi, '@').replace(/\s*\(at\)\s*/gi, '@')
+        .replace(/\s*\[dot\]\s*/gi, '.').replace(/\s*\(dot\)\s*/gi, '.');
 
-      // Extract result blocks
       const blocks = decoded.match(/<li[^>]*class="[^"]*b_algo[^"]*"[^>]*>[\s\S]*?<\/li>/gi) ?? [];
 
-      for (const block of blocks) {
+      // Process blocks in parallel batches of 5
+      const pending = blocks.slice(0, needed * 3);
+      for (let i = 0; i < pending.length; i += 5) {
         if (leads.length >= needed) break;
+        const batch = pending.slice(i, i + 5);
 
-        // Get title
-        const titleMatch = block.match(/<h2[^>]*>.*?<a[^>]*>(.*?)<\/a>/i);
-        const name = titleMatch?.[1]?.replace(/<[^>]+>/g,'').trim() ?? '';
-        if (!name || name.length < 3) continue;
+        await Promise.all(batch.map(async (block) => {
+          if (leads.length >= needed) return;
 
-        const cleanName = name.replace(/\s*[-|–|·].*$/,'').trim();
-        if (seen.has(cleanName.toLowerCase())) continue;
+          const titleMatch = block.match(/<h2[^>]*>.*?<a[^>]*>(.*?)<\/a>/i);
+          const name = titleMatch?.[1]?.replace(/<[^>]+>/g, '').trim() ?? '';
+          if (!name || name.length < 3) return;
 
-        // Get URL
-        const urlMatch = block.match(/href="(https?:\/\/[^"]+)"/i);
-        const url = urlMatch?.[1] ?? '';
+          const cleanName = name.replace(/\s*[-|–|·].*$/, '').trim();
+          if (seen.has(cleanName.toLowerCase())) return;
 
-        // Get snippet
-        const snippetMatch = block.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
-        const snippet = snippetMatch?.[1]?.replace(/<[^>]+>/g,'').trim() ?? '';
+          const urlMatch = block.match(/href="(https?:\/\/[^"]+)"/i);
+          const url = urlMatch?.[1] ?? '';
 
-        // Check snippet for email first
-        const snippetEmails = extractEmails(snippet + ' ' + block);
-        let email = bestEmail(snippetEmails);
+          const snippetMatch = block.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
+          const snippet = snippetMatch?.[1]?.replace(/<[^>]+>/g, '').trim() ?? '';
 
-        // Fetch website if no email in snippet
-        const skipDomains = ['bing.com','microsoft.com','facebook.com','linkedin.com',
-                             'twitter.com','instagram.com','youtube.com','wikipedia.org'];
-        if (!email && url && !skipDomains.some(s => url.includes(s))) {
-          try { email = await fetchEmailFromSite(url); } catch {}
-        }
+          // Check snippet for email first (fastest)
+          let email = bestEmail(extractEmails(snippet + ' ' + block));
 
-        // Guess from domain if still nothing
-        if (!email && url) {
-          try {
-            const guesses = await guessAndVerifyEmails(url, { companyName: cleanName, location, maxGuesses: 2, smtpVerify: false });
-            if (guesses[0]) email = guesses[0].email;
-          } catch {}
-        }
+          // Fetch website in parallel if no email in snippet
+          if (!email && url && !skipDomains.some(s => url.includes(s))) {
+            email = await fetchEmailFromSite(url, cleanName, niche, location, aiProvider);
+          }
 
-        seen.add(cleanName.toLowerCase());
-        const hasReal = !!email && !email.startsWith('info@') || (!!email && extractEmails(snippet).length > 0);
-        const finalEmail = email ?? guessedEmail(cleanName, url);
+          if (!email) return; // skip — no real email found
 
-        const lead: ScrapedLead = {
-          company_name: cleanName,
-          email: finalEmail,
-          emailIsReal: !!email,
-          niche, location,
-          company_context: snippet || `${cleanName} is a ${niche} in ${location}.`,
-          source_url: url,
-          website: url || undefined,
-        };
-        leads.push(lead);
-        onLead(lead);
-        console.log(`    ${!!email ? '✅' : '⚠️ '} ${cleanName} → ${finalEmail}`);
+          seen.add(cleanName.toLowerCase());
+          const lead: ScrapedLead = {
+            company_name: cleanName,
+            email,
+            emailIsReal: true,
+            niche, location,
+            company_context: snippet || `${cleanName} is a ${niche} in ${location}.`,
+            source_url: url,
+            website: url || undefined,
+          };
+          leads.push(lead);
+          onLead(lead);
+          console.log(`    ✅ ${cleanName} → ${email}`);
+        }));
       }
 
-      await delay(600);
+      await delay(500);
     } catch (err: any) {
-      console.log(`  ⚠️  Bing query failed: ${err?.message?.slice(0,60)}`);
+      console.log(`  ⚠️  Bing query failed: ${err?.message?.slice(0, 60)}`);
     }
   }
 
   return leads;
 }
 
-// ─── Source 2: DuckDuckGo (no bot detection) ──────────────────────────────────
+// ─── Source 2: DuckDuckGo ─────────────────────────────────────────────────────
 
 async function scrapeDDG(
   niche: string, location: string, needed: number,
-  seen: Set<string>, onLead: (l: ScrapedLead) => void
+  seen: Set<string>, onLead: (l: ScrapedLead) => void,
+  aiProvider: AIProviderConfig | null
 ): Promise<ScrapedLead[]> {
   const leads: ScrapedLead[] = [];
 
@@ -266,10 +349,13 @@ async function scrapeDDG(
     `${niche} ${location} contact email`,
     `"${niche}" "${location}" email address`,
     `${niche} business ${location} "contact us"`,
-    `${niche} ${location} site:yellowpages.com OR site:yelp.com`,
     `${niche} ${location} "@gmail.com" OR "@yahoo.com"`,
     `${niche} company ${location} official website`,
+    `${niche} ${location} site:yellowpages.com OR site:yelp.com`,
   ];
+
+  const skipDomains = ['duckduckgo.com','facebook.com','linkedin.com','twitter.com',
+                       'instagram.com','youtube.com','wikipedia.org'];
 
   for (const query of queries) {
     if (leads.length >= needed) break;
@@ -278,52 +364,41 @@ async function scrapeDDG(
       const html = await httpGet(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`);
 
       const decoded = html
-        .replace(/\s*\[at\]\s*/gi,'@').replace(/\s*\(at\)\s*/gi,'@')
-        .replace(/\s*\[dot\]\s*/gi,'.').replace(/\s*\(dot\)\s*/gi,'.');
+        .replace(/\s*\[at\]\s*/gi, '@').replace(/\s*\(at\)\s*/gi, '@')
+        .replace(/\s*\[dot\]\s*/gi, '.').replace(/\s*\(dot\)\s*/gi, '.');
 
-      // DDG result blocks
       const blocks = decoded.match(/<div class="result[^"]*"[\s\S]*?<\/div>\s*<\/div>/gi) ?? [];
 
       for (const block of blocks) {
         if (leads.length >= needed) break;
 
         const titleMatch = block.match(/class="result__title"[^>]*>[\s\S]*?<a[^>]*>([\s\S]*?)<\/a>/i);
-        const name = titleMatch?.[1]?.replace(/<[^>]+>/g,'').trim() ?? '';
+        const name = titleMatch?.[1]?.replace(/<[^>]+>/g, '').trim() ?? '';
         if (!name || name.length < 3) continue;
 
-        const cleanName = name.replace(/\s*[-|–|·].*$/,'').trim();
+        const cleanName = name.replace(/\s*[-|–|·].*$/, '').trim();
         if (seen.has(cleanName.toLowerCase())) continue;
 
         const urlMatch = block.match(/class="result__url"[^>]*>([\s\S]*?)<\/a>/i);
-        const rawUrl = urlMatch?.[1]?.replace(/<[^>]+>/g,'').trim() ?? '';
+        const rawUrl = urlMatch?.[1]?.replace(/<[^>]+>/g, '').trim() ?? '';
         const url = rawUrl.startsWith('http') ? rawUrl : `https://${rawUrl}`;
 
         const snippetMatch = block.match(/class="result__snippet"[^>]*>([\s\S]*?)<\/span>/i);
-        const snippet = snippetMatch?.[1]?.replace(/<[^>]+>/g,'').trim() ?? '';
+        const snippet = snippetMatch?.[1]?.replace(/<[^>]+>/g, '').trim() ?? '';
 
-        const snippetEmails = extractEmails(snippet + ' ' + block);
-        let email = bestEmail(snippetEmails);
+        let email = bestEmail(extractEmails(snippet + ' ' + block));
 
-        const skipDomains = ['duckduckgo.com','facebook.com','linkedin.com','twitter.com',
-                             'instagram.com','youtube.com','wikipedia.org'];
         if (!email && url && !skipDomains.some(s => url.includes(s))) {
-          try { email = await fetchEmailFromSite(url); } catch {}
+          email = await fetchEmailFromSite(url, cleanName, niche, location, aiProvider);
         }
 
-        if (!email && url) {
-          try {
-            const guesses = await guessAndVerifyEmails(url, { companyName: cleanName, location, maxGuesses: 2, smtpVerify: false });
-            if (guesses[0]) email = guesses[0].email;
-          } catch {}
-        }
+        if (!email) continue;
 
         seen.add(cleanName.toLowerCase());
-        const finalEmail = email ?? guessedEmail(cleanName, url);
-
         const lead: ScrapedLead = {
           company_name: cleanName,
-          email: finalEmail,
-          emailIsReal: !!email,
+          email,
+          emailIsReal: true,
           niche, location,
           company_context: snippet || `${cleanName} is a ${niche} in ${location}.`,
           source_url: url,
@@ -331,12 +406,12 @@ async function scrapeDDG(
         };
         leads.push(lead);
         onLead(lead);
-        console.log(`    ${!!email ? '✅' : '⚠️ '} ${cleanName} → ${finalEmail}`);
+        console.log(`    ✅ ${cleanName} → ${email}`);
       }
 
-      await delay(500);
+      await delay(400);
     } catch (err: any) {
-      console.log(`  ⚠️  DDG query failed: ${err?.message?.slice(0,60)}`);
+      console.log(`  ⚠️  DDG query failed: ${err?.message?.slice(0, 60)}`);
     }
   }
 
@@ -344,10 +419,12 @@ async function scrapeDDG(
 }
 
 // ─── Source 3: Google Maps (Puppeteer) ───────────────────────────────────────
+// Website fetch runs IN PARALLEL with Maps listing extraction
 
 async function scrapeGoogleMaps(
   niche: string, location: string, maxResults: number,
-  seen: Set<string>, onLead: (l: ScrapedLead) => void
+  seen: Set<string>, onLead: (l: ScrapedLead) => void,
+  aiProvider: AIProviderConfig | null
 ): Promise<ScrapedLead[]> {
   const leads: ScrapedLead[] = [];
   let browser: Browser | undefined;
@@ -378,21 +455,22 @@ async function scrapeGoogleMaps(
       .then(() => true).catch(() => false);
 
     if (!feedLoaded) {
-      console.log('  ⚠️  Maps blocked — skipping');
+      console.log('  ⚠️  Maps feed not found — skipping');
       return [];
     }
 
-    // Scroll to load listings
+    // Scroll to load listings — scroll more for large targets
     let prev = 0, stale = 0;
-    for (let i = 0; i < Math.min(Math.ceil(maxResults / 5) + 5, 40); i++) {
+    const maxScrolls = Math.min(Math.ceil(maxResults / 4) + 10, 80);
+    for (let i = 0; i < maxScrolls; i++) {
       await page.evaluate(() => {
         const f = document.querySelector('[role="feed"]');
         if (f) f.scrollTop = f.scrollHeight;
       });
-      await delay(1200);
+      await delay(1000);
       const count = await page.evaluate(() => document.querySelectorAll('[role="article"]').length);
       if (count >= maxResults) break;
-      if (count === prev) { if (++stale >= 3) break; } else stale = 0;
+      if (count === prev) { if (++stale >= 4) break; } else stale = 0;
       prev = count;
     }
 
@@ -413,15 +491,18 @@ async function scrapeGoogleMaps(
 
     console.log(`  Found ${businesses.length} Maps listings`);
 
-    // Process in parallel batches of 6
-    for (let i = 0; i < businesses.length; i += 6) {
-      const batch = businesses.slice(i, i + 6);
+    // Process in parallel batches of 5
+    // For each business: open place page to get website, then fetch website email — all in parallel
+    for (let i = 0; i < businesses.length; i += 5) {
+      const batch = businesses.slice(i, i + 5);
+
       await Promise.all(batch.map(async (biz: any) => {
         if (seen.has(biz.name.toLowerCase())) return;
 
         let website: string | null = null;
         let phone = biz.phone;
 
+        // Step 1: Open the Maps place page to get the website URL
         try {
           const p = await browser!.newPage();
           await p.setUserAgent(ua);
@@ -434,7 +515,9 @@ async function scrapeGoogleMaps(
               let site = auth?.href ?? null;
               if (!site) {
                 for (const a of Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href]'))) {
-                  if (a.href.startsWith('http') && !skip.some(s => a.href.includes(s))) { site = a.href; break; }
+                  if (a.href.startsWith('http') && !skip.some(s => a.href.includes(s))) {
+                    site = a.href; break;
+                  }
                 }
               }
               const tel = document.querySelector<HTMLAnchorElement>('a[href^="tel:"]');
@@ -445,21 +528,33 @@ async function scrapeGoogleMaps(
           } finally { await p.close().catch(() => {}); }
         } catch {}
 
+        // Step 2: Fetch email from website IN PARALLEL with the above
+        // (website fetch starts as soon as we have the URL, no extra waiting)
         let email: string | null = null;
-        if (website) { try { email = await fetchEmailFromSite(website); } catch {} }
-        if (!email) {
+        if (website) {
+          email = await fetchEmailFromSite(website, biz.name, niche, location, aiProvider);
+        }
+
+        // Step 3: If still no email, try SMTP-based email guesser
+        if (!email && website) {
           try {
-            const guesses = await guessAndVerifyEmails(website ?? null, { companyName: biz.name, location, maxGuesses: 3, smtpVerify: false });
+            const guesses = await guessAndVerifyEmails(website, {
+              companyName: biz.name, location, maxGuesses: 3, smtpVerify: false,
+            });
             if (guesses[0]) email = guesses[0].email;
           } catch {}
         }
 
+        if (!email) {
+          console.log(`  ⏭  ${biz.name} — no email found`);
+          return;
+        }
+
         seen.add(biz.name.toLowerCase());
-        const finalEmail = email ?? guessedEmail(biz.name, website);
         const lead: ScrapedLead = {
           company_name: biz.name,
-          email: finalEmail,
-          emailIsReal: !!email,
+          email,
+          emailIsReal: true,
           niche,
           location: biz.address || location,
           company_context: `${biz.name} is a ${niche} in ${location}. ${biz.rating}`.trim(),
@@ -469,7 +564,7 @@ async function scrapeGoogleMaps(
         };
         leads.push(lead);
         onLead(lead);
-        console.log(`  ${!!email ? '✅' : '⚠️ '} ${biz.name} → ${finalEmail}`);
+        console.log(`  ✅ ${biz.name} → ${email}`);
       }));
     }
 
@@ -482,22 +577,19 @@ async function scrapeGoogleMaps(
   return leads;
 }
 
-// ─── Source 4: Directory scraper (Yelp, YP, BBB) ─────────────────────────────
+// ─── Source 4: Directories (Yelp, YP, BBB) ───────────────────────────────────
 
 async function scrapeDirectories(
   niche: string, location: string, needed: number,
-  seen: Set<string>, onLead: (l: ScrapedLead) => void
+  seen: Set<string>, onLead: (l: ScrapedLead) => void,
+  aiProvider: AIProviderConfig | null
 ): Promise<ScrapedLead[]> {
   const leads: ScrapedLead[] = [];
 
   const sources = [
-    // Yellow Pages
     `https://www.yellowpages.com/search?search_terms=${encodeURIComponent(niche)}&geo_location_terms=${encodeURIComponent(location)}`,
-    // Yelp
     `https://www.yelp.com/search?find_desc=${encodeURIComponent(niche)}&find_loc=${encodeURIComponent(location)}`,
-    // BBB
     `https://www.bbb.org/search?find_text=${encodeURIComponent(niche)}&find_loc=${encodeURIComponent(location)}`,
-    // Hotfrog
     `https://www.hotfrog.com/search/${encodeURIComponent(location)}/${encodeURIComponent(niche)}`,
   ];
 
@@ -507,8 +599,6 @@ async function scrapeDirectories(
       console.log(`  📒 Directory: ${url.split('?')[0]}`);
       const html = await httpGet(url);
 
-      // Extract business names and websites from directory pages
-      // Generic patterns that work across most directories
       const namePatterns = [
         /<h\d[^>]*class="[^"]*(?:business|company|name|title)[^"]*"[^>]*>([\s\S]*?)<\/h\d>/gi,
         /<a[^>]*class="[^"]*(?:business-name|company-name|biz-name)[^"]*"[^>]*>([\s\S]*?)<\/a>/gi,
@@ -519,12 +609,11 @@ async function scrapeDirectories(
       for (const pattern of namePatterns) {
         let m: RegExpExecArray | null;
         while ((m = pattern.exec(html)) !== null) {
-          const n = m[1].replace(/<[^>]+>/g,'').trim();
+          const n = m[1].replace(/<[^>]+>/g, '').trim();
           if (n && n.length > 2 && n.length < 100) names.push(n);
         }
       }
 
-      // Also extract any emails directly from the page
       const pageEmails = extractEmails(html);
 
       for (let i = 0; i < Math.min(names.length, needed - leads.length); i++) {
@@ -533,12 +622,12 @@ async function scrapeDirectories(
         seen.add(name.toLowerCase());
 
         const email = bestEmail(pageEmails) ?? null;
-        const finalEmail = email ?? guessedEmail(name);
+        if (!email) continue;
 
         const lead: ScrapedLead = {
           company_name: name,
-          email: finalEmail,
-          emailIsReal: !!email,
+          email,
+          emailIsReal: true,
           niche, location,
           company_context: `${name} is a ${niche} in ${location}.`,
           source_url: url,
@@ -547,9 +636,9 @@ async function scrapeDirectories(
         onLead(lead);
       }
 
-      await delay(800);
+      await delay(600);
     } catch (err: any) {
-      console.log(`  ⚠️  Directory failed: ${err?.message?.slice(0,60)}`);
+      console.log(`  ⚠️  Directory failed: ${err?.message?.slice(0, 60)}`);
     }
   }
 
@@ -558,51 +647,65 @@ async function scrapeDirectories(
 
 // ─── Main entry point ─────────────────────────────────────────────────────────
 
+/**
+ * Scrape leads for a niche + location using all sources in parallel.
+ *
+ * @param aiProvider  Optional AI provider config (from user's AI Settings).
+ *                    When provided, AI helps generate search queries and
+ *                    extract emails from website content.
+ */
 export async function scrapeWithoutAPI(
   niche: string,
   location: string,
   maxLeads = 100,
-  onLead?: (lead: ScrapedLead) => void
+  onLead?: (lead: ScrapedLead) => void,
+  aiProvider: AIProviderConfig | null = null
 ): Promise<ScrapedLead[]> {
   console.log(`\n${'='.repeat(60)}`);
   console.log(`🚀 Scraping: "${niche}" in "${location}" (target: ${maxLeads})`);
+  if (aiProvider) console.log(`🤖 AI-assisted: ${aiProvider.provider}/${aiProvider.active_model}`);
   console.log(`${'='.repeat(60)}\n`);
 
   const all: ScrapedLead[] = [];
   const seen = new Set<string>();
-  const emit = (lead: ScrapedLead) => { all.push(lead); onLead?.(lead); };
 
-  // Run all sources in parallel for maximum speed
-  const chunkSize = Math.ceil(maxLeads / 3);
+  const emit = (lead: ScrapedLead) => {
+    all.push(lead);
+    onLead?.(lead);
+  };
 
-  const [mapsLeads, bingLeads, ddgLeads, dirLeads] = await Promise.allSettled([
-    scrapeGoogleMaps(niche, location, chunkSize, seen, emit),
-    scrapeBing(niche, location, chunkSize, seen, emit),
-    scrapeDDG(niche, location, chunkSize, seen, emit),
-    scrapeDirectories(niche, location, Math.ceil(maxLeads / 4), seen, emit),
+  // For large targets (200+), give each source a bigger slice.
+  // Maps can scroll deep; Bing/DDG run multiple query pages.
+  const mapsTarget  = Math.ceil(maxLeads * 0.45);   // ~45% from Maps
+  const bingTarget  = Math.ceil(maxLeads * 0.35);   // ~35% from Bing
+  const ddgTarget   = Math.ceil(maxLeads * 0.25);   // ~25% from DDG
+  const dirTarget   = Math.ceil(maxLeads * 0.20);   // ~20% from directories
+
+  // All 4 sources run in parallel
+  const [mapsRes, bingRes, ddgRes, dirRes] = await Promise.allSettled([
+    scrapeGoogleMaps(niche, location, mapsTarget, seen, emit, aiProvider),
+    scrapeBing(niche, location, bingTarget, seen, emit, aiProvider),
+    scrapeDDG(niche, location, ddgTarget, seen, emit, aiProvider),
+    scrapeDirectories(niche, location, dirTarget, seen, emit, aiProvider),
   ]);
 
   const counts = {
-    maps: mapsLeads.status === 'fulfilled' ? mapsLeads.value.length : 0,
-    bing: bingLeads.status === 'fulfilled' ? bingLeads.value.length : 0,
-    ddg: ddgLeads.status === 'fulfilled' ? ddgLeads.value.length : 0,
-    dir: dirLeads.status === 'fulfilled' ? dirLeads.value.length : 0,
+    maps: mapsRes.status === 'fulfilled' ? mapsRes.value.length : 0,
+    bing: bingRes.status === 'fulfilled' ? bingRes.value.length : 0,
+    ddg:  ddgRes.status  === 'fulfilled' ? ddgRes.value.length  : 0,
+    dir:  dirRes.status  === 'fulfilled' ? dirRes.value.length  : 0,
   };
-
-  const realCount = all.filter(l => l.emailIsReal).length;
 
   console.log(`\n${'='.repeat(60)}`);
   console.log(`📊 Results: ${all.length} leads | Maps:${counts.maps} Bing:${counts.bing} DDG:${counts.ddg} Dir:${counts.dir}`);
-  console.log(`   Verified emails: ${realCount} | Guessed: ${all.length - realCount}`);
   console.log(`${'='.repeat(60)}\n`);
 
-  // Deduplicate by company name
+  // Deduplicate by email
   const deduped = Array.from(
-    new Map(all.map(l => [l.company_name.toLowerCase(), l])).values()
+    new Map(all.map(l => [l.email.toLowerCase(), l])).values()
   );
 
   return deduped.slice(0, maxLeads);
 }
 
-// Keep scrapeGoogleMaps exported for direct use
 export { scrapeGoogleMaps };

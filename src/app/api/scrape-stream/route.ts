@@ -13,6 +13,7 @@
 
 import { NextRequest } from "next/server";
 import { createClient } from "../../../../supabase/server";
+import { createServiceClient } from "../../../../supabase/service";
 import { scrapeWithoutAPI } from "@/utils/puppeteer-scraper";
 
 export const runtime = "nodejs";
@@ -59,6 +60,19 @@ export async function POST(request: NextRequest) {
     .single();
 
   const jobId = job?.id ?? null;
+
+  // Load user's active AI provider for AI-assisted scraping
+  let aiProvider = null;
+  try {
+    const service = createServiceClient();
+    const { data } = await service
+      .from("ai_settings")
+      .select("provider, api_key, active_model")
+      .eq("user_id", user.id)
+      .eq("is_active", true)
+      .single();
+    if (data?.api_key) aiProvider = data;
+  } catch { /* AI is optional — scraping works without it */ }
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -149,7 +163,8 @@ export async function POST(request: NextRequest) {
           niche.trim(),
           location.trim(),
           maxResults,
-          onLead
+          onLead,
+          aiProvider
         );
 
         // Fallback: if callback wasn't called (older scraper version)

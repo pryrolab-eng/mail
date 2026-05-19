@@ -225,11 +225,12 @@ export async function POST(request: NextRequest) {
             sent_at: new Date().toISOString(),
           });
 
-          // Log to sent_emails
+          // Log to sent_emails (include to_email so reply matching works)
           await serviceSupabase.from("sent_emails").insert({
             user_id: user.id,
             lead_id: email.leadId,
             campaign_id: campaignId,
+            to_email: email.to,
             subject: email.subject,
             body: email.body,
             sent_at: new Date().toISOString(),

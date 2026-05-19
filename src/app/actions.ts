@@ -672,6 +672,23 @@ export const sendBulkEmailsChunkedAction = async (
       // Process each email in the chunk
       for (const email of chunk) {
         try {
+          // Skip leads with no email address — never attempt to send to null
+          if (!email.lead_email || !email.lead_email.trim()) {
+            results.failed++;
+            chunkResults.failed++;
+            results.errors.push(`${email.company_name}: no email address`);
+            console.warn(`⏭  Skipping ${email.company_name} — no email address`);
+            continue;
+          }
+
+          // Basic format check before anything else
+          if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.lead_email.trim())) {
+            results.failed++;
+            chunkResults.failed++;
+            results.errors.push(`${email.lead_email}: invalid email format`);
+            continue;
+          }
+
           // Verify email if enabled
           if (verifyEmails) {
             const isValid = await verifyEmailDNS(email.lead_email);
@@ -722,9 +739,19 @@ export const sendBulkEmailsChunkedAction = async (
 
           // Inject tracking pixel into email body (1×1 transparent GIF)
           const trackingPixelHtml = `<img src="${appUrl}/api/track/open/${trackingPixelId}" width="1" height="1" style="display:none" alt="" />`;
+
+          // Convert plain text to proper HTML with paragraph breaks
+          const bodyToHtml = (text: string) => {
+            if (/<html[\s>]/i.test(text)) return text;
+            const paragraphs = text.trim().split(/\n\n+/)
+              .map(p => `<p style="margin:0 0 14px 0;line-height:1.6;">${p.split('\n').map(l => l.trim()).join('<br>')}</p>`)
+              .join('\n');
+            return `<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;font-size:14px;color:#222;max-width:600px;margin:0 auto;padding:20px;">\n${paragraphs}\n${trackingPixelHtml}\n</body></html>`;
+          };
+
           const trackedBody = email.body.includes('<html')
             ? email.body.replace('</body>', `${trackingPixelHtml}</body>`)
-            : `${email.body}\n\n${trackingPixelHtml}`;
+            : bodyToHtml(email.body);
 
           // Send email using SMTP manager (auto-rotates across 60 accounts)
           const result = await smtpManager.sendEmail(

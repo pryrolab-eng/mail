@@ -335,17 +335,28 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
 
   const generateBulkEmails = async () => {
     if (selectedLeadIds.size === 0) { toast.error("Select at least one lead"); return; }
-    setIsGenerating(true);
-    setBulkEmails([]);
 
     const selected = leads.filter((l) => selectedLeadIds.has(l.id));
+    const withEmail = selected.filter(l => l.email && l.email.trim());
+    const noEmail = selected.filter(l => !l.email || !l.email.trim());
+
+    if (noEmail.length > 0) {
+      toast.warning(`${noEmail.length} lead${noEmail.length > 1 ? 's' : ''} have no email and will be skipped.`);
+    }
+    if (withEmail.length === 0) {
+      toast.error("None of the selected leads have an email address. Add emails first.");
+      return;
+    }
+
+    setIsGenerating(true);
+    setBulkEmails([]);
 
     try {
       const res = await fetch("/api/generate-emails-bulk", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          leads: selected.map((l) => ({
+          leads: withEmail.map((l) => ({
             id: l.id,
             company_name: l.company_name,
             niche: l.niche,
@@ -429,10 +440,22 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
 
   const sendBulkEmails = async () => {
     if (bulkEmails.length === 0) return;
+
+    // Filter out any emails with no recipient — warn the user
+    const validEmails = bulkEmails.filter(e => e.lead_email && e.lead_email.trim());
+    const skipped = bulkEmails.length - validEmails.length;
+    if (skipped > 0) {
+      toast.warning(`${skipped} lead${skipped > 1 ? 's' : ''} skipped — no email address. Add emails to those leads first.`);
+    }
+    if (validEmails.length === 0) {
+      toast.error("None of the selected leads have an email address.");
+      return;
+    }
+
     setIsSendingBulk(true);
-    const sendToastId = toast.loading(`Sending ${bulkEmails.length} emails in batches of 10…`);
+    const sendToastId = toast.loading(`Sending ${validEmails.length} emails in batches of 10…`);
     try {
-      const emailsToSend = bulkEmails.map(email => ({
+      const emailsToSend = validEmails.map(email => ({
         lead_id: email.lead?.id || "",
         lead_email: email.lead_email,
         company_name: email.company_name,
