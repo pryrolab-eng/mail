@@ -74,9 +74,10 @@ export async function generateEmailsBatch(
     .replace(/\$\{['"]?yourService['"]?\}/g, yourService);
 
   // Build a compact lead list for the prompt
-  const leadList = leads.map((l, i) =>
-    `[${i + 1}] id:${l.id} | company:${l.company_name} | niche:${l.niche || 'unknown'} | location:${l.location || 'unknown'} | context:${(l.company_context || '').slice(0, 120)}`
-  ).join('\n');
+  const leadList = leads.map((l, i) => {
+    const web = (l as { website?: string }).website;
+    return `[${i + 1}] id:${l.id} | company:${l.company_name} | niche:${l.niche || 'unknown'} | location:${l.location || 'unknown'}${web ? ` | website:${web}` : ''} | research:${(l.company_context || '').slice(0, 200)}`;
+  }).join('\n');
 
   const prompt = `You are an elite B2B cold email copywriter. Generate one personalized cold email per lead below.
 
@@ -93,11 +94,11 @@ ${leadList}
 
 === CRITICAL RULES ===
 - Write exactly ${leads.length} emails, one per lead
-- Each email must be personalized to that specific company/niche/location
+- Use ONLY facts from each lead's research line — never invent awards, posts, or metrics
+- Open with a specific observation or honest industry question (90–120 words per body)
+- Explain ${yourCompany} as ERP/business software replacing spreadsheets and scattered tools
 - NO "I hope this email finds you well", NO "reaching out", NO "I came across"
-- Start body immediately with the problem
-- Reference ${yourCompany} naturally
-- Keep each email concise
+- One soft CTA: 10-minute call
 
 === OUTPUT FORMAT (strict JSON, no extra text) ===
 Return a JSON array with exactly ${leads.length} objects:

@@ -1,7 +1,7 @@
 "use client";
 
 import { ActiveModule } from "@/types/platform";
-import { Radio, Mail, Settings, Layout, LogOut, Server, Clock, Menu, BarChart2, FileText, Megaphone } from "lucide-react";
+import { Radio, Mail, Settings, Layout, LogOut, Server, Clock, Menu, Megaphone, Workflow } from "lucide-react";
 import { NotificationsBell } from "./NotificationsPanel";
 
 interface TopBarProps {
@@ -14,14 +14,13 @@ interface TopBarProps {
 
 const moduleInfo: Record<ActiveModule, { label: string; desc: string; icon: React.ElementType }> = {
   scraper:       { label: "Email Scraper",    desc: "Find and scrape leads by niche & location",          icon: Radio },
+  pipeline:      { label: "Outreach Pipeline", desc: "Research, draft, and send leads through each stage", icon: Workflow },
   "email-writer":{ label: "AI Email Writer",  desc: "Generate personalized cold outreach emails",         icon: Mail },
-  crm:           { label: "CRM Pipeline",     desc: "Manage and track your outreach pipeline",            icon: Layout },
+  crm:           { label: "CRM",              desc: "Track replies, interest, and relationship status",   icon: Layout },
   "smtp-manager":{ label: "SMTP Manager",     desc: "Manage your email sending accounts",                 icon: Server },
   "ai-settings": { label: "AI Settings",      desc: "Configure AI providers and active model",            icon: Settings },
   "follow-up":   { label: "Follow-Up System", desc: "Manage automated email follow-up sequences",         icon: Clock },
-  analytics:     { label: "Analytics",        desc: "Real-time campaign performance and insights",        icon: BarChart2 },
   campaigns:     { label: "Campaigns",        desc: "Create and manage email campaigns",                  icon: Megaphone },
-  templates:     { label: "Templates",        desc: "Manage reusable email templates",                    icon: FileText },
 };
 
 export default function TopBar({ activeModule, userEmail, userId, onLogout, onMenuToggle }: TopBarProps) {

@@ -1,0 +1,49 @@
+====================================
+PRYRO FREE STACK — HEALTH CHECK
+
+✅ CHECK 1: District expansion        PASS
+Kigali → 12 areas (5299ms): Nyarugenge Kigali, Gasabo Kigali, Kicukiro Kigali, Kimironko Kigali, Remera Kigali, Nyamirambo Kigali…
+Nairobi → 12 areas (3496ms): Westlands Nairobi, Karen Nairobi, Kilimani Nairobi, Upper Hill Nairobi, Lavington Nairobi, Langata Nairobi…
+Paris → 12 areas (5836ms): La Défense Paris, Champs-Élysées Paris, Opéra Paris, Le Marais Paris, Saint-Germain-des-Prés Paris, Montparnasse Paris…
+✅ CHECK 2: Free email finder        PASS
+boho.rw → 1 email(s): info@boho.rw (website) (took 2.8s)
+isk.ac.ke → 1 email(s): info@isk.ac.ke (guessed) (took 4.6s)
+hillcrest.ac.ke → 1 email(s): admin@hillcrest.ac.ke (website) (took 2.3s)
+❌ CHECK 3: Email verification        FAIL
+Reason: One or more emails returned unexpected valid/invalid
+info@boho.rw → invalid (no_mx) ✗ expected valid [8ms]
+info@isk.ac.ke → invalid (no_mx) ✗ expected valid [6ms]
+fake@notarealdomain12345.com → invalid (no_mx) ✓ [7ms]
+test@mailinator.com → invalid (disposable) ✓ [0ms]
+notanemail → invalid (invalid_format) ✓ [0ms]
+✅ CHECK 4: Knowledge Graph        PASS
+Hillcrest International Schools + Nairobi → desc=no category=— website=— types=— (1759ms)
+Boho Restaurant + Kigali → desc=no category=— website=— types=— (804ms)
+Stanford University + California → desc=yes category=education website=http://www.stanford.edu/ types=MovieTheater, Place, Thing, CollegeOrUniversity, Organization, Corporation, EducationalOrganization (826ms)
+✅ CHECK 5: Deduplication        PASS
+In-memory: first allowed=true, second blocked=true
+Duplicate blocked at: DB — lead already exists (email or company+location)
+✅ CHECK 6: Junk filter        PASS
+3/3 junk rejected, 2/2 valid accepted
+support@doctolib.com → rejected (expected rejected) ✓
+info@mailinator.com → rejected (expected rejected) ✓
+info@boho.rw → accepted (expected accepted) ✓
+noreply@company.com → rejected (expected rejected) ✓
+info@legitimatebusiness.com → accepted (expected accepted) ✓
+[PUPPETEER TEST] Browser launched OK, page title: Google
+  AI provider: gemini/gemini-2.5-flash
+  scrapeWithoutAPI("hotel", "Kigali Rwanda", 10)
+  Timeout: 120s (Maps jobs may take 3+ min each with Docker)
+[CHECK 7] Still scraping… elapsed: 15s
+[CHECK 7] Still scraping… elapsed: 30s
+[CHECK 7] Still scraping… elapsed: 45s
+[CHECK 7] Still scraping… elapsed: 60s
+[CHECK 7] Still scraping… elapsed: 75s
+[CHECK 7] Still scraping… elapsed: 90s
+[CHECK 7] Still scraping… elapsed: 105s
+⚠️  CHECK 7: End-to-end scrape     MANUAL TEST REQUIRED
+Error: Scrape timed out after 120s
+Run scraper UI manually: hotel / Kigali Rwanda / 10 leads
+====================================
+RESULT: 6/7 checks passed
+====================================

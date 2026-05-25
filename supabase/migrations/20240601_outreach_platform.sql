@@ -48,7 +48,25 @@ CREATE TABLE IF NOT EXISTS public.lead_status_history (
   changed_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Enable Realtime
-ALTER PUBLICATION supabase_realtime ADD TABLE public.leads;
-ALTER PUBLICATION supabase_realtime ADD TABLE public.generated_emails;
-ALTER PUBLICATION supabase_realtime ADD TABLE public.ai_settings;
+-- Enable Realtime (idempotent — skip if already in publication)
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables
+    WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'leads'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.leads;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables
+    WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'generated_emails'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.generated_emails;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables
+    WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'ai_settings'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.ai_settings;
+  END IF;
+END $$;

@@ -1,14 +1,32 @@
 ﻿import puppeteer, { Browser } from 'puppeteer';
 
-import { guessAndVerifyEmails } from './email-guesser';
-import type { AIProviderConfig } from './ai-scraper-helper';
+import { buildEnrichedLeadContext } from './lead-context-builder';
+import { guessAndVerifyEmails, inferDomainsFromName } from './email-guesser';
+import {
+  finalizeScrapedLead,
+  finalizePhoneOnlyScrapeLead,
+  isJunkScrapeLead,
+} from './scrape-lead-quality';
+import {
+  expandCityIntoAreas,
+  formatExpandAreasStatus,
+  type AIProviderConfig,
+} from './ai-scraper-helper';
+import type { WebsiteEmailPickResult } from './business-email-picker';
+import {
+  buildWebsiteFetchUrls,
+  discoverContactLikeUrls,
+  discoverSitemapContactUrls,
+  extractEmailsFromHtml,
+  pickFromAggregatedPages,
+} from './business-email-picker';
 
 /**
  * Lead Scraper — Parallel Google Maps + Website + AI email finding
  *
  * HOW IT WORKS:
- * 1. Google Maps (Puppeteer) — finds businesses with name/address/website.
- *    Website email fetch runs IN PARALLEL while Maps loads each listing.
+ * 1. Google Maps — Docker (gosom) when GMAPS_SCRAPER_URL is reachable, else Puppeteer.
+ *    Website email fetch uses HTTP fetch (not Puppeteer).
  * 2. Bing Search (HTTP fetch) — extracts emails from search snippets + sites.
  * 3. DuckDuckGo (HTTP fetch) — additional search source.
  * 4. Business directories — Yelp, YellowPages, BBB.
@@ -18,16 +36,207 @@ import type { AIProviderConfig } from './ai-scraper-helper';
  * Only leads with REAL found emails are returned — no guesses.
  */
 
-export interface ScrapedLead {
-  company_name: string;
-  email: string;
-  emailIsReal: boolean;
-  niche: string;
-  location: string;
-  company_context: string;
-  source_url?: string;
-  phone?: string;
-  website?: string;
+export type { ScrapedLead } from '@/types/platform';
+import type { ScrapedLead } from '@/types/platform';
+
+/** Options for a single scrape pass (shared across chunk rounds) */
+export interface ScrapeRunOptions {
+  /** Dedupe company names across multiple chunk rounds */
+  seen?: Set<string>;
+  /** 1-based round index — rotates queries and deepens Maps scroll */
+  round?: number;
+}
+
+function appendRoundQueries(
+  queries: string[],
+  niche: string,
+  location: string,
+  round: number
+): string[] {
+  if (round <= 1) return queries;
+  const locRw = /rwanda|kigali/i.test(location);
+  const byRound: string[][] = [
+    [],
+    locRw
+      ? [
+          `${niche} Rwanda business email contact`,
+          `${niche} Kigali company website`,
+          `"${niche}" Rwanda "@gmail.com" OR "info@"`,
+        ]
+      : [
+          `${niche} ${location} business directory email`,
+          `${niche} ${location} contact page`,
+        ],
+    locRw
+      ? [
+          `${niche} Gikondo Kigali email`,
+          `${niche} Nyarugenge Rwanda contact`,
+          `site:.rw ${niche} email`,
+        ]
+      : [
+          `${niche} near ${location} email`,
+          `${niche} services "${location}" contact us`,
+        ],
+    locRw
+      ? [
+          `${niche} warehouse Rwanda list`,
+          `${niche} logistics Kigali companies`,
+          `${niche} Magerwa OR TrAC contact`,
+        ]
+      : [
+          `best ${niche} in ${location}`,
+          `${niche} company ${location} official website`,
+        ],
+  ];
+  const extras = byRound[Math.min(round - 1, byRound.length - 1)] ?? [];
+  return [...extras, ...queries];
+}
+
+/** Use the user's location as-is for every scrape round. */
+export function resolveScrapeLocationForRound(
+  location: string,
+  _round?: number
+): string {
+  return location.trim();
+}
+
+// ─── City district expansion (any city, AI-generated areas) ───────────────────
+
+const TRAILING_COUNTRY_WORDS = new Set([
+  'rwanda', 'kenya', 'france', 'germany', 'italy', 'spain', 'portugal', 'netherlands',
+  'belgium', 'austria', 'switzerland', 'sweden', 'norway', 'denmark', 'finland', 'poland',
+  'greece', 'turkey', 'egypt', 'morocco', 'tunisia', 'algeria', 'nigeria', 'ghana',
+  'ethiopia', 'uganda', 'tanzania', 'zambia', 'zimbabwe', 'mozambique', 'angola',
+  'cameroon', 'senegal', 'ivory', 'coast', 'côte', "d'ivoire", 'mali', 'niger', 'chad',
+  'usa', 'us', 'u.s.a.', 'u.s.', 'america', 'canada', 'mexico', 'brazil', 'argentina',
+  'chile', 'colombia', 'peru', 'venezuela', 'ecuador', 'bolivia', 'paraguay', 'uruguay',
+  'uk', 'england', 'scotland', 'wales', 'ireland', 'australia', 'zealand', 'india',
+  'pakistan', 'bangladesh', 'china', 'japan', 'korea', 'thailand', 'vietnam', 'philippines',
+  'indonesia', 'malaysia', 'singapore', 'uae', 'emirates', 'dubai', 'qatar', 'kuwait',
+  'israel', 'jordan', 'lebanon', 'iraq', 'iran', 'saudi', 'arabia', 'russia', 'ukraine',
+]);
+
+const TRAILING_COUNTRY_PHRASES = [
+  'south africa', 'united states', 'united kingdom', 'new zealand', 'south korea',
+  'north korea', 'saudi arabia', 'costa rica', 'el salvador', 'puerto rico',
+  'sri lanka', 'sierra leone', 'burkina faso', 'cape verde', 'hong kong',
+  'ivory coast', "cote d'ivoire", 'côte d\'ivoire',
+];
+
+/** Extract primary city name from a user location string. */
+export function extractCityFromLocation(location: string): string {
+  let s = location.trim();
+  if (!s) return location;
+
+  const commaIdx = s.indexOf(',');
+  if (commaIdx >= 0) {
+    const first = s.slice(0, commaIdx).trim();
+    if (first.length >= 2) return first;
+  }
+
+  let lower = s.toLowerCase();
+  for (const phrase of [...TRAILING_COUNTRY_PHRASES].sort((a, b) => b.length - a.length)) {
+    if (lower.endsWith(` ${phrase}`)) {
+      s = s.slice(0, -(phrase.length + 1)).trim();
+      lower = s.toLowerCase();
+    }
+  }
+
+  const parts = s.split(/\s+/);
+  while (parts.length > 1) {
+    const last = parts[parts.length - 1].toLowerCase().replace(/\./g, '');
+    if (TRAILING_COUNTRY_WORDS.has(last) || /^[a-z]{2}$/i.test(last)) {
+      parts.pop();
+    } else {
+      break;
+    }
+  }
+
+  return parts.join(' ').trim() || location.trim();
+}
+
+/** True when the location is only a country name (e.g. "Rwanda", "Kenya"). */
+function isCountryOnlyLocation(location: string): boolean {
+  const t = location.trim().toLowerCase().replace(/\./g, '');
+  if (!t) return false;
+  if (TRAILING_COUNTRY_WORDS.has(t)) return true;
+  return TRAILING_COUNTRY_PHRASES.some((phrase) => t === phrase.toLowerCase());
+}
+
+/**
+ * Build deduplicated Google Maps search queries: full location + AI sub-areas.
+ * Always includes at least `{niche} in {location}`.
+ */
+export async function expandLocationQueries(
+  niche: string,
+  location: string,
+  aiProvider: AIProviderConfig | null
+): Promise<string[]> {
+  const primary = `${niche} in ${location}`;
+  const seen = new Set<string>([primary.toLowerCase()]);
+  const queries: string[] = [primary];
+
+  const city = extractCityFromLocation(location);
+  if (!city) return queries;
+
+  const expansion = await expandCityIntoAreas(niche, city, aiProvider);
+  if (expansion.areas.length === 0 && expansion.status !== 'cached') {
+    console.log(`[EXPANSION] ${city}: ${formatExpandAreasStatus(expansion)}`);
+  } else if (expansion.areas.length > 0) {
+    console.log(
+      `[EXPANSION] ${city}: ${expansion.areas.length} areas (${expansion.status})`
+    );
+  }
+
+  for (const area of expansion.areas) {
+    const q = `${niche} in ${area}`;
+    const key = q.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      queries.push(q);
+    }
+  }
+
+  return queries;
+}
+
+/** Kigali districts for Maps query expansion (no AI required). */
+const KIGALI_MAP_AREAS = [
+  'Nyarugenge Kigali',
+  'Gasabo Kigali',
+  'Kicukiro Kigali',
+  'Nyamirambo Kigali',
+  'Kimironko Kigali',
+  'Remera Kigali',
+  'Gikondo Kigali',
+  'Kacyiru Kigali',
+  'Kanombe Kigali',
+  'Gisozi Kigali',
+];
+
+/**
+ * Step 1: One Maps query per Kigali district when location mentions Kigali.
+ * Always includes the original `{niche} in {location}` first.
+ */
+export function expandKigaliQueries(niche: string, location: string): string[] {
+  const primary = `${niche} in ${location}`;
+  if (!/kigali/i.test(location)) {
+    return [primary];
+  }
+
+  const seen = new Set<string>([primary.toLowerCase()]);
+  const queries: string[] = [primary];
+
+  for (const area of KIGALI_MAP_AREAS) {
+    const q = `${niche} in ${area}`;
+    const key = q.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      queries.push(q);
+    }
+  }
+
+  return queries;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -93,6 +302,8 @@ async function aiExtractEmail(
   aiProvider: AIProviderConfig | null
 ): Promise<string | null> {
   if (!aiProvider?.api_key) return null;
+  const { isScrapeAiAvailable } = await import('./ai-scrape-rate-limit');
+  if (!isScrapeAiAvailable()) return null;
 
   const { extractEmailFromContent } = await import('./ai-scraper-helper');
   try {
@@ -113,6 +324,8 @@ async function aiPredictEmail(
   aiProvider: AIProviderConfig | null
 ): Promise<string | null> {
   if (!aiProvider?.api_key) return null;
+  const { isScrapeAiAvailable } = await import('./ai-scrape-rate-limit');
+  if (!isScrapeAiAvailable()) return null;
 
   const { predictEmailPattern } = await import('./ai-scraper-helper');
   try {
@@ -122,13 +335,199 @@ async function aiPredictEmail(
   }
 }
 
-// ─── HTTP email fetcher (parallel: contact + about + homepage at once) ────────
+// ─── HTTP email fetcher (parallel contact paths + homepage; domain-aware pick) ─
 
 /**
- * Fetch email from a website. Checks /contact, /about, and homepage IN PARALLEL.
- * Also decodes Cloudflare email obfuscation and [at] patterns.
- * If no email found in HTML, optionally asks AI to extract from page text.
+ * Crawl contact paths + homepage (#contact is same HTML as /).
+ * Aggregates all emails, scores by domain + mailto + contact page — not "first page wins".
  */
+export async function fetchEmailsFromSiteDetailed(
+  website: string,
+  companyName = '',
+  niche = '',
+  location = '',
+  aiProvider: AIProviderConfig | null = null
+): Promise<WebsiteEmailPickResult | null> {
+  const normalized = website.startsWith('http') ? website : `https://${website}`;
+  let siteHost = '';
+  try {
+    siteHost = new URL(normalized).hostname.replace(/^www\./, '');
+  } catch {
+    return null;
+  }
+
+  const urls = new Set(buildWebsiteFetchUrls(normalized));
+  const headers = {
+    'User-Agent': randomUA(),
+    Accept: 'text/html',
+    'Accept-Language': 'en-US,en;q=0.9',
+  };
+
+  const pages: Array<{ url: string; extracted: ReturnType<typeof extractEmailsFromHtml> }> =
+    [];
+  const htmlByUrl = new Map<string, string>();
+
+  // Discover dealer/find-us links from homepage (e.g. volkswagen.rw → /en/find-a-dealer.html)
+  try {
+    const homeUrl = `${new URL(normalized).origin}/`;
+    const homeRes = await fetch(homeUrl, { headers, signal: AbortSignal.timeout(12_000) });
+    if (homeRes.ok) {
+      const homeHtml = await homeRes.text();
+      for (const u of discoverContactLikeUrls(homeHtml, homeUrl)) {
+        urls.add(u);
+      }
+    }
+    for (const u of await discoverSitemapContactUrls(normalized)) {
+      urls.add(u);
+    }
+  } catch {
+    /* best-effort discovery */
+  }
+
+  const fetchOne = async (url: string) => {
+    try {
+      const res = await fetch(url, { headers, signal: AbortSignal.timeout(12_000) });
+      if (!res.ok) return;
+      const html = await res.text();
+      htmlByUrl.set(url, html);
+      const extracted = extractEmailsFromHtml(html);
+      if (extracted.all.length > 0) {
+        pages.push({ url, extracted });
+      }
+    } catch {
+      /* next url */
+    }
+  };
+
+  await Promise.all(Array.from(urls).slice(0, 24).map((url) => fetchOne(url)));
+
+  const websitePuppeteerFallback = (): boolean => {
+    const v = process.env.WEBSITE_FETCH_PUPPETEER?.trim().toLowerCase();
+    if (v === 'false' || v === '0' || v === 'no') return false;
+    return true;
+  };
+
+  const mergePage = (url: string, html: string) => {
+    htmlByUrl.set(url, html);
+    const extracted = extractEmailsFromHtml(html);
+    if (extracted.all.length === 0) return;
+    const existing = pages.find((p) => p.url === url);
+    if (existing) {
+      existing.extracted = extracted;
+    } else {
+      pages.push({ url, extracted });
+    }
+    for (const u of discoverContactLikeUrls(html, url)) {
+      urls.add(u);
+    }
+  };
+
+  let pick = pages.length > 0 ? pickFromAggregatedPages(pages, siteHost) : null;
+
+  if (!pick?.bestEmail && websitePuppeteerFallback()) {
+    const { fetchHtmlWithBrowser } = await import('./search-engine-fetch');
+    const tryUrls = [
+      `${new URL(normalized).origin}/`,
+      normalized,
+      ...Array.from(urls).filter((u) => /contact|dealer|find-us|about|imprint/i.test(u)),
+    ].slice(0, 5);
+    const seenTry = new Set<string>();
+    for (const url of tryUrls) {
+      if (seenTry.has(url)) continue;
+      seenTry.add(url);
+      try {
+        console.log(`  🌐 Browser fetch (JS site): ${url.replace(/^https?:\/\//, '').slice(0, 60)}`);
+        const html = await fetchHtmlWithBrowser(url);
+        mergePage(url, html);
+      } catch (err) {
+        console.log(
+          `  ⚠️  Browser fetch failed: ${(err as Error).message?.slice(0, 50)}`
+        );
+      }
+    }
+    const extraUrls = Array.from(urls).filter((u) => !htmlByUrl.has(u));
+    await Promise.all(extraUrls.slice(0, 8).map((url) => fetchOne(url)));
+    pick = pages.length > 0 ? pickFromAggregatedPages(pages, siteHost) : pick;
+  }
+
+  const { isSyntheticSiteEmail } = await import('./business-email-picker');
+  const pickLooksGuessed =
+    pick?.bestEmail &&
+    isSyntheticSiteEmail(pick.bestEmail, siteHost) &&
+    !pick.mailtoEmails.includes(pick.bestEmail);
+
+  if (
+    (!pick?.bestEmail || pickLooksGuessed) &&
+    aiProvider &&
+    (await import('./ai-scrape-rate-limit')).isScrapeAiAvailable()
+  ) {
+    const combined = Array.from(htmlByUrl.values())
+      .map((html) => html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' '))
+      .join(' ')
+      .slice(0, 6000);
+    const aiEmail = await aiExtractEmail(
+      companyName,
+      siteHost,
+      combined,
+      niche,
+      aiProvider
+    );
+    if (aiEmail && !isSyntheticSiteEmail(aiEmail, siteHost)) {
+      pages.push({
+        url: normalized,
+        extracted: {
+          mailtos: [],
+          visible: [aiEmail.toLowerCase()],
+          all: [aiEmail.toLowerCase()],
+        },
+      });
+      pick = pickFromAggregatedPages(pages, siteHost);
+    }
+  }
+
+  if (
+    !pick?.bestEmail &&
+    !pick?.mailtoEmails.length &&
+    aiProvider &&
+    (await import('./ai-scrape-rate-limit')).isScrapeAiAvailable()
+  ) {
+    const predicted = await aiPredictEmail(companyName, siteHost, niche, location, aiProvider);
+    if (predicted && !isSyntheticSiteEmail(predicted.toLowerCase(), siteHost)) {
+      pick = {
+        bestEmail: predicted.toLowerCase(),
+        allEmails: [predicted.toLowerCase()],
+        mailtoEmails: [],
+      };
+    }
+  }
+
+  if (!pick?.bestEmail) {
+    try {
+      const { findEmailsForDomain } = await import('./free-email-finder');
+      const freeHits = await findEmailsForDomain(siteHost, companyName);
+      if (freeHits.length) {
+        const guessed = freeHits[0].email.toLowerCase();
+        console.log(`  📧 Free finder (${freeHits[0].source}) for ${siteHost}: ${guessed}`);
+        try {
+          const { scrapeRunStats } = await import('./scrape-run-stats');
+          scrapeRunStats.commonCrawlHits++;
+        } catch {
+          /* optional */
+        }
+        pick = {
+          bestEmail: guessed,
+          allEmails: [guessed],
+          mailtoEmails: [],
+        };
+      }
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  return pick;
+}
+
 async function fetchEmailFromSite(
   website: string,
   companyName = '',
@@ -136,78 +535,14 @@ async function fetchEmailFromSite(
   location = '',
   aiProvider: AIProviderConfig | null = null
 ): Promise<string | null> {
-  if (!website.startsWith('http')) website = `https://${website}`;
-  let origin = '';
-  try { origin = new URL(website).origin; } catch { return null; }
-
-  const domain = new URL(origin).hostname.replace('www.', '');
-  const headers = { 'User-Agent': randomUA(), 'Accept': 'text/html', 'Accept-Language': 'en-US,en;q=0.9' };
-
-  // Fetch all pages in parallel — don't wait for one before starting the next
-  const urls = [
-    `${origin}/contact`,
-    `${origin}/contact-us`,
-    `${origin}/about`,
-    `${origin}/about-us`,
+  const pick = await fetchEmailsFromSiteDetailed(
     website,
-  ];
-
-  const fetchPage = async (url: string): Promise<string | null> => {
-    try {
-      const res = await fetch(url, { headers, signal: AbortSignal.timeout(8_000) });
-      if (!res.ok) return null;
-      let html = await res.text();
-
-      // Decode obfuscation
-      html = html
-        .replace(/\s*\[at\]\s*/gi, '@').replace(/\s*\(at\)\s*/gi, '@')
-        .replace(/\s*\[dot\]\s*/gi, '.').replace(/\s*\(dot\)\s*/gi, '.');
-
-      // Cloudflare email decode
-      const cfRe = /data-cfemail="([0-9a-f]+)"/gi;
-      let m: RegExpExecArray | null;
-      while ((m = cfRe.exec(html)) !== null) {
-        const bytes = (m[1] ?? '').match(/.{2}/g) ?? [];
-        if (bytes.length < 2) continue;
-        const key = parseInt(bytes[0] ?? '0', 16);
-        const dec = bytes.slice(1).map((b: string) => String.fromCharCode(parseInt(b, 16) ^ key)).join('');
-        if (dec.includes('@')) html += ` ${dec}`;
-      }
-
-      // mailto: links first (most reliable)
-      const mailtos: string[] = [];
-      const mr = /mailto:([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})/gi;
-      while ((m = mr.exec(html)) !== null) mailtos.push(m[1].toLowerCase());
-
-      const found = bestEmail([...mailtos, ...extractEmails(html)]);
-      if (found) return found;
-
-      // If AI is available and we found no email, try AI extraction on this page
-      if (aiProvider) {
-        const pageText = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 3000);
-        const aiEmail = await aiExtractEmail(companyName, domain, pageText, niche, aiProvider);
-        if (aiEmail) return aiEmail;
-      }
-
-      return null;
-    } catch {
-      return null;
-    }
-  };
-
-  // Run all page fetches in parallel, return first non-null result
-  const results = await Promise.allSettled(urls.map(fetchPage));
-  for (const r of results) {
-    if (r.status === 'fulfilled' && r.value) return r.value;
-  }
-
-  // Last resort: AI predicts the email pattern from domain + company info
-  if (aiProvider) {
-    const predicted = await aiPredictEmail(companyName, domain, niche, location, aiProvider);
-    if (predicted) return predicted;
-  }
-
-  return null;
+    companyName,
+    niche,
+    location,
+    aiProvider
+  );
+  return pick?.bestEmail ?? null;
 }
 
 // ─── HTTP helper ──────────────────────────────────────────────────────────────
@@ -225,217 +560,341 @@ async function httpGet(url: string): Promise<string> {
   return res.text();
 }
 
+function decodeHtmlEntities(s: string): string {
+  return s.replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+}
+
+const SEARCH_SKIP_DOMAINS = [
+  'bing.com', 'microsoft.com', 'duckduckgo.com', 'facebook.com', 'linkedin.com',
+  'twitter.com', 'instagram.com', 'youtube.com', 'wikipedia.org', 'wikimedia.org',
+  'investopedia.com', 'britannica.com', 'courierslist.com', 'zoominfo.com',
+  'africabizinfo.com', 'yellowpages.com', 'yelp.com', 'hotfrog.com', 'bbb.org',
+  'hunter.io', 'apollo.io', 'tripadvisor.com',
+];
+
+async function leadFromSearchHit(
+  hit: { title: string; url: string; snippet: string },
+  niche: string,
+  location: string,
+  seen: Set<string>,
+  onLead: (l: ScrapedLead) => boolean,
+  aiProvider: AIProviderConfig | null,
+  leads: ScrapedLead[]
+): Promise<boolean> {
+  const cleanName = hit.title.replace(/\s*[-|–|·].*$/, '').trim();
+  if (!cleanName || cleanName.length < 3 || seen.has(cleanName.toLowerCase())) {
+    return false;
+  }
+
+  const url = hit.url?.trim() || '';
+  if (url && SEARCH_SKIP_DOMAINS.some((s) => url.includes(s))) return false;
+
+  if (
+    isJunkScrapeLead(
+      {
+        company_name: cleanName,
+        email: 'pending@local',
+        website: url || undefined,
+        source_snippet: hit.snippet,
+      },
+      location
+    )
+  ) {
+    return false;
+  }
+
+  let email = bestEmail(extractEmails(`${hit.snippet} ${hit.title}`));
+  if (!email && url) {
+    email = await fetchEmailFromSite(url, cleanName, niche, location, aiProvider);
+  }
+  if (!email) return false;
+
+  const enriched = await buildEnrichedLeadContext({
+    companyName: cleanName,
+    niche,
+    location,
+    snippet: hit.snippet,
+    website: url || undefined,
+  });
+  const lead: ScrapedLead = {
+    company_name: cleanName,
+    email,
+    emailIsReal: true,
+    niche: enriched.niche,
+    location,
+    source_snippet: hit.snippet,
+    company_context: enriched.context,
+    source_url: url,
+    website: url || undefined,
+  };
+  if (onLead(lead)) {
+    seen.add(cleanName.toLowerCase());
+    leads.push(lead);
+    return true;
+  }
+  return false;
+}
+
 // ─── Source 1: Bing Search ────────────────────────────────────────────────────
 
 async function scrapeBing(
   niche: string, location: string, needed: number,
-  seen: Set<string>, onLead: (l: ScrapedLead) => void,
-  aiProvider: AIProviderConfig | null
+  seen: Set<string>, onLead: (l: ScrapedLead) => boolean,
+  aiProvider: AIProviderConfig | null,
+  round = 1
 ): Promise<ScrapedLead[]> {
   const leads: ScrapedLead[] = [];
+  const { buildBingQueries, fetchBingHtml, parseBingHits, isBingBlockedHtml } =
+    await import('./search-engine-fetch');
 
-  // AI-generated queries + hardcoded fallbacks
-  let queries = [
-    `${niche} ${location} email contact`,
-    `"${niche}" "${location}" email`,
-    `${niche} company ${location} "contact us" email`,
-    `${niche} ${location} "@gmail.com" OR "@yahoo.com" OR "@outlook.com"`,
-    `${niche} ${location} "contact@" OR "info@" OR "hello@"`,
-    `${niche} services ${location} email address`,
-    `top ${niche} ${location} website email`,
-    `list of ${niche} businesses in ${location} email`,
-    `${niche} ${location} "sales@" OR "admin@" OR "office@"`,
-    `${niche} ${location} site:yellowpages.com`,
-    `${niche} ${location} site:yelp.com email`,
-    `${niche} ${location} site:hotfrog.com`,
-    `${niche} ${location} "enquiries@" OR "enquiry@"`,
-    `${niche} ${location} contact page email address`,
-    `${niche} near ${location} official website contact`,
-  ];
-
-  // Ask AI to generate smarter queries if available
+  let queries = buildBingQueries(niche, location);
   if (aiProvider) {
     try {
       const { generateSearchQueries } = await import('./ai-scraper-helper');
       const aiQueries = await generateSearchQueries(niche, location, aiProvider);
-      if (aiQueries.length > 0) {
-        queries = [...aiQueries, ...queries]; // AI queries first
-      }
-    } catch { /* fallback to hardcoded */ }
+      if (aiQueries.length > 0) queries = [...aiQueries.slice(0, 4), ...queries];
+    } catch { /* fallback */ }
   }
+  queries = appendRoundQueries(queries, niche, location, round);
 
-  const skipDomains = ['bing.com','microsoft.com','facebook.com','linkedin.com',
-                       'twitter.com','instagram.com','youtube.com','wikipedia.org'];
+  let totalHits = 0;
+  let noEmail = 0;
 
   for (const query of queries) {
     if (leads.length >= needed) break;
     try {
       console.log(`  🔵 Bing: ${query}`);
-      const html = await httpGet(`https://www.bing.com/search?q=${encodeURIComponent(query)}&count=50`);
+      const { html, via } = await fetchBingHtml(query, location);
+      if (isBingBlockedHtml(html)) {
+        console.log(`  ⚠️  Bing: captcha/block detected (${via})`);
+        continue;
+      }
+      const hits = parseBingHits(html, needed * 3);
+      totalHits += hits.length;
+      console.log(`  🔵 Bing: ${hits.length} results (${via})`);
 
-      const decoded = html
-        .replace(/\s*\[at\]\s*/gi, '@').replace(/\s*\(at\)\s*/gi, '@')
-        .replace(/\s*\[dot\]\s*/gi, '.').replace(/\s*\(dot\)\s*/gi, '.');
-
-      const blocks = decoded.match(/<li[^>]*class="[^"]*b_algo[^"]*"[^>]*>[\s\S]*?<\/li>/gi) ?? [];
-
-      // Process blocks in parallel batches of 5
-      const pending = blocks.slice(0, needed * 3);
-      for (let i = 0; i < pending.length; i += 5) {
+      for (const hit of hits) {
         if (leads.length >= needed) break;
-        const batch = pending.slice(i, i + 5);
+        const before = leads.length;
+        await leadFromSearchHit(hit, niche, location, seen, onLead, aiProvider, leads);
+        if (leads.length === before) noEmail++;
+      }
+      await delay(700);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.log(`  ⚠️  Bing query failed: ${msg.slice(0, 60)}`);
+    }
+  }
 
-        await Promise.all(batch.map(async (block) => {
-          if (leads.length >= needed) return;
+  if (leads.length === 0 && totalHits > 0) {
+    console.log(
+      `  🔵 Bing: ${totalHits} hits but 0 emails (${noEmail} had no extractable email — try Maps/Docker)`
+    );
+  }
+  return leads;
+}
 
-          const titleMatch = block.match(/<h2[^>]*>.*?<a[^>]*>(.*?)<\/a>/i);
-          const name = titleMatch?.[1]?.replace(/<[^>]+>/g, '').trim() ?? '';
-          if (!name || name.length < 3) return;
+// ─── Source 2: DuckDuckGo (or Brave API) ──────────────────────────────────────
 
-          const cleanName = name.replace(/\s*[-|–|·].*$/, '').trim();
-          if (seen.has(cleanName.toLowerCase())) return;
+async function scrapeDDG(
+  niche: string, location: string, needed: number,
+  seen: Set<string>, onLead: (l: ScrapedLead) => boolean,
+  aiProvider: AIProviderConfig | null,
+  round = 1
+): Promise<ScrapedLead[]> {
+  const leads: ScrapedLead[] = [];
+  const { braveWebSearch, hasBraveSearchApi } = await import('./brave-search-api');
+  const { buildDdgQueries, fetchDdgHtml, parseDdgHits } = await import('./search-engine-fetch');
 
-          const urlMatch = block.match(/href="(https?:\/\/[^"]+)"/i);
-          const url = urlMatch?.[1] ?? '';
+  let queries = buildDdgQueries(niche, location);
+  queries = appendRoundQueries(queries, niche, location, round);
 
-          const snippetMatch = block.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
-          const snippet = snippetMatch?.[1]?.replace(/<[^>]+>/g, '').trim() ?? '';
+  let consecutiveBlocks = 0;
+  const useBrave = hasBraveSearchApi();
 
-          // Check snippet for email first (fastest)
-          let email = bestEmail(extractEmails(snippet + ' ' + block));
+  if (useBrave) {
+    console.log('  🦁 DDG slot: using Brave Search API (BRAVE_SEARCH_API_KEY)');
+  }
 
-          // Fetch website in parallel if no email in snippet
-          if (!email && url && !skipDomains.some(s => url.includes(s))) {
-            email = await fetchEmailFromSite(url, cleanName, niche, location, aiProvider);
-          }
+  for (const query of queries) {
+    if (leads.length >= needed) break;
+    if (!useBrave && consecutiveBlocks >= 3) {
+      console.log('  ⚠️  DuckDuckGo blocked after 3 tries — skipping remaining DDG queries');
+      break;
+    }
 
-          if (!email) return; // skip — no real email found
+    try {
+      console.log(`  🦆 ${useBrave ? 'Brave' : 'DDG'}: ${query}`);
+      let hits: { title: string; url: string; snippet: string }[] = [];
 
-          seen.add(cleanName.toLowerCase());
-          const lead: ScrapedLead = {
-            company_name: cleanName,
-            email,
-            emailIsReal: true,
-            niche, location,
-            company_context: snippet || `${cleanName} is a ${niche} in ${location}.`,
-            source_url: url,
-            website: url || undefined,
-          };
-          leads.push(lead);
-          onLead(lead);
-          console.log(`    ✅ ${cleanName} → ${email}`);
-        }));
+      if (useBrave) {
+        hits = await braveWebSearch(query, 15);
+      } else {
+        const { html, via, blocked } = await fetchDdgHtml(query);
+        if (blocked) {
+          consecutiveBlocks++;
+          console.log(`  ⚠️  DDG bot-check (${via}) — query skipped`);
+          await delay(1200);
+          continue;
+        }
+        consecutiveBlocks = 0;
+        hits = parseDdgHits(html, via);
+        console.log(`  🦆 DDG: ${hits.length} results (${via})`);
       }
 
-      await delay(500);
-    } catch (err: any) {
-      console.log(`  ⚠️  Bing query failed: ${err?.message?.slice(0, 60)}`);
+      for (const hit of hits) {
+        if (leads.length >= needed) break;
+        await leadFromSearchHit(hit, niche, location, seen, onLead, aiProvider, leads);
+      }
+      await delay(useBrave ? 400 : 900);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.log(`  ⚠️  DDG/Brave query failed: ${msg.slice(0, 60)}`);
     }
+  }
+
+  if (!useBrave && consecutiveBlocks >= 3) {
+    console.log(
+      '  💡 DDG blocks server fetch. Free fix: SEARCH_USE_PUPPETEER=ddg in .env (or wait for Bing browser retry)'
+    );
   }
 
   return leads;
 }
 
-// ─── Source 2: DuckDuckGo ─────────────────────────────────────────────────────
-
-async function scrapeDDG(
-  niche: string, location: string, needed: number,
-  seen: Set<string>, onLead: (l: ScrapedLead) => void,
-  aiProvider: AIProviderConfig | null
+/** Run Maps across district-expanded queries (round 1) or a single query (later rounds). */
+async function scrapeGoogleMapsMultiQuery(
+  niche: string,
+  scrapeLocation: string,
+  leadLocation: string,
+  mapsTarget: number,
+  seen: Set<string>,
+  onLead: (l: ScrapedLead) => boolean,
+  aiProvider: AIProviderConfig | null,
+  round: number
 ): Promise<ScrapedLead[]> {
-  const leads: ScrapedLead[] = [];
-
-  const queries = [
-    `${niche} ${location} contact email`,
-    `"${niche}" "${location}" email address`,
-    `${niche} business ${location} "contact us"`,
-    `${niche} ${location} "@gmail.com" OR "@yahoo.com"`,
-    `${niche} company ${location} official website`,
-    `${niche} ${location} site:yellowpages.com OR site:yelp.com`,
-  ];
-
-  const skipDomains = ['duckduckgo.com','facebook.com','linkedin.com','twitter.com',
-                       'instagram.com','youtube.com','wikipedia.org'];
-
-  for (const query of queries) {
-    if (leads.length >= needed) break;
+  let locationQueries: string[];
+  if (round !== 1) {
+    locationQueries = [`${niche} in ${scrapeLocation}`];
+  } else if (/kigali/i.test(scrapeLocation)) {
+    locationQueries = expandKigaliQueries(niche, scrapeLocation);
     try {
-      console.log(`  🦆 DDG: ${query}`);
-      const html = await httpGet(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`);
-
-      const decoded = html
-        .replace(/\s*\[at\]\s*/gi, '@').replace(/\s*\(at\)\s*/gi, '@')
-        .replace(/\s*\[dot\]\s*/gi, '.').replace(/\s*\(dot\)\s*/gi, '.');
-
-      const blocks = decoded.match(/<div class="result[^"]*"[\s\S]*?<\/div>\s*<\/div>/gi) ?? [];
-
-      for (const block of blocks) {
-        if (leads.length >= needed) break;
-
-        const titleMatch = block.match(/class="result__title"[^>]*>[\s\S]*?<a[^>]*>([\s\S]*?)<\/a>/i);
-        const name = titleMatch?.[1]?.replace(/<[^>]+>/g, '').trim() ?? '';
-        if (!name || name.length < 3) continue;
-
-        const cleanName = name.replace(/\s*[-|–|·].*$/, '').trim();
-        if (seen.has(cleanName.toLowerCase())) continue;
-
-        const urlMatch = block.match(/class="result__url"[^>]*>([\s\S]*?)<\/a>/i);
-        const rawUrl = urlMatch?.[1]?.replace(/<[^>]+>/g, '').trim() ?? '';
-        const url = rawUrl.startsWith('http') ? rawUrl : `https://${rawUrl}`;
-
-        const snippetMatch = block.match(/class="result__snippet"[^>]*>([\s\S]*?)<\/span>/i);
-        const snippet = snippetMatch?.[1]?.replace(/<[^>]+>/g, '').trim() ?? '';
-
-        let email = bestEmail(extractEmails(snippet + ' ' + block));
-
-        if (!email && url && !skipDomains.some(s => url.includes(s))) {
-          email = await fetchEmailFromSite(url, cleanName, niche, location, aiProvider);
-        }
-
-        if (!email) continue;
-
-        seen.add(cleanName.toLowerCase());
-        const lead: ScrapedLead = {
-          company_name: cleanName,
-          email,
-          emailIsReal: true,
-          niche, location,
-          company_context: snippet || `${cleanName} is a ${niche} in ${location}.`,
-          source_url: url,
-          website: url || undefined,
-        };
-        leads.push(lead);
-        onLead(lead);
-        console.log(`    ✅ ${cleanName} → ${email}`);
-      }
-
-      await delay(400);
-    } catch (err: any) {
-      console.log(`  ⚠️  DDG query failed: ${err?.message?.slice(0, 60)}`);
+      const { scrapeRunStats } = await import('./scrape-run-stats');
+      scrapeRunStats.mapsQueries = locationQueries.length;
+    } catch {
+      /* optional stats */
+    }
+    console.log(
+      `🗺  Maps Kigali expansion: ${locationQueries.length} queries (${locationQueries.length - 1} districts)`
+    );
+    locationQueries.forEach((q, i) => console.log(`   ${i + 1}. ${q}`));
+  } else if (isCountryOnlyLocation(scrapeLocation)) {
+    locationQueries = [`${niche} in ${scrapeLocation}`];
+    console.log(`🗺  Maps: 1 query (country location, no expansion)`);
+    try {
+      const { scrapeRunStats } = await import('./scrape-run-stats');
+      scrapeRunStats.mapsQueries = 1;
+    } catch {
+      /* optional stats */
+    }
+  } else {
+    locationQueries = await expandLocationQueries(niche, scrapeLocation, aiProvider);
+    try {
+      const { scrapeRunStats } = await import('./scrape-run-stats');
+      scrapeRunStats.mapsQueries = locationQueries.length;
+    } catch {
+      /* optional stats */
+    }
+    if (locationQueries.length > 1) {
+      const city = extractCityFromLocation(scrapeLocation);
+      console.log(
+        `🗺  Maps district expansion: ${locationQueries.length} queries (${locationQueries.length - 1} areas in ${city})`
+      );
+      locationQueries.forEach((q, i) => console.log(`   ${i + 1}. ${q}`));
     }
   }
 
-  return leads;
+  const maxPerQuery = Math.max(1, Math.ceil(mapsTarget / locationQueries.length));
+  const collected: ScrapedLead[] = [];
+
+  const { getGmapsDockerConfig, isGmapsDockerAvailable, scrapeGmapsDockerQuery } =
+    await import('./gmaps-docker-client');
+  const dockerCfg = getGmapsDockerConfig();
+  const useGmapsDocker = dockerCfg ? await isGmapsDockerAvailable() : false;
+  if (useGmapsDocker && dockerCfg) {
+    console.log(
+      `🐳 Maps: Docker (${dockerCfg.baseUrl}) · Bing/DDG/dirs: HTTP (Puppeteer not used for Maps)`
+    );
+  } else if (dockerCfg) {
+    console.log(
+      `⚠️  GMAPS_SCRAPER_URL=${dockerCfg.baseUrl} unreachable — Maps fallback to Puppeteer; Bing/DDG/dirs unchanged`
+    );
+  }
+
+  for (const query of locationQueries) {
+    if (collected.length >= mapsTarget) break;
+    const need = mapsTarget - collected.length;
+    const limit = Math.min(maxPerQuery, need);
+    if (useGmapsDocker) {
+      const dockerResult = await scrapeGmapsDockerQuery(
+        query,
+        niche,
+        leadLocation,
+        limit,
+        seen,
+        onLead,
+        aiProvider,
+        fetchEmailFromSite
+      );
+      collected.push(...dockerResult.leads);
+    } else {
+      const batch = await scrapeGoogleMaps(
+        query,
+        niche,
+        leadLocation,
+        limit,
+        seen,
+        onLead,
+        aiProvider,
+        round
+      );
+      collected.push(...batch);
+    }
+  }
+
+  return collected;
 }
 
 // ─── Source 3: Google Maps (Puppeteer) ───────────────────────────────────────
 // Website fetch runs IN PARALLEL with Maps listing extraction
 
 async function scrapeGoogleMaps(
-  niche: string, location: string, maxResults: number,
-  seen: Set<string>, onLead: (l: ScrapedLead) => void,
-  aiProvider: AIProviderConfig | null
+  mapsSearch: string,
+  niche: string,
+  leadLocation: string,
+  maxResults: number,
+  seen: Set<string>, onLead: (l: ScrapedLead) => boolean,
+  aiProvider: AIProviderConfig | null,
+  round = 1
 ): Promise<ScrapedLead[]> {
   const leads: ScrapedLead[] = [];
   let browser: Browser | undefined;
+  let browserFromPool = false;
 
   try {
-    browser = await puppeteer.launch({
-      headless: true,
-      args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage',
-             '--disable-blink-features=AutomationControlled','--disable-gpu',
-             '--window-size=1280,800'],
-    });
+    const { getActiveScrapeBrowserPool } = await import('./scrape-browser-pool');
+    const pool = getActiveScrapeBrowserPool();
+    if (pool) {
+      browser = await pool.getBrowser();
+      browserFromPool = true;
+    } else {
+      browser = await puppeteer.launch({
+        headless: true,
+        args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage',
+               '--disable-blink-features=AutomationControlled','--disable-gpu',
+               '--window-size=1280,800'],
+      });
+    }
 
     const page = await browser.newPage();
     const ua = randomUA();
@@ -446,8 +905,8 @@ async function scrapeGoogleMaps(
       (window as any).chrome = { runtime: {} };
     });
 
-    const mapsUrl = `https://www.google.com/maps/search/${encodeURIComponent(`${niche} in ${location}`)}`;
-    console.log(`\n🗺  Google Maps: ${mapsUrl}`);
+    const mapsUrl = `https://www.google.com/maps/search/${encodeURIComponent(mapsSearch)}`;
+    console.log(`\n🗺  Google Maps: ${mapsSearch}`);
 
     await page.goto(mapsUrl, { waitUntil: 'networkidle2', timeout: 30_000 });
 
@@ -459,9 +918,12 @@ async function scrapeGoogleMaps(
       return [];
     }
 
-    // Scroll to load listings — scroll more for large targets
+    // Scroll to load listings — deeper scroll on later chunk rounds
     let prev = 0, stale = 0;
-    const maxScrolls = Math.min(Math.ceil(maxResults / 4) + 10, 80);
+    const maxScrolls = Math.min(
+      Math.ceil(maxResults / 4) + 10 + (round - 1) * 30,
+      150
+    );
     for (let i = 0; i < maxScrolls; i++) {
       await page.evaluate(() => {
         const f = document.querySelector('[role="feed"]');
@@ -489,11 +951,13 @@ async function scrapeGoogleMaps(
       return out;
     }, maxResults);
 
-    console.log(`  Found ${businesses.length} Maps listings`);
+    console.log(`  Found ${businesses.length} Maps listings (round ${round})`);
+
+    const listStart = round > 1 ? (round - 1) * Math.max(8, Math.floor(maxResults * 0.75)) : 0;
 
     // Process in parallel batches of 5
     // For each business: open place page to get website, then fetch website email — all in parallel
-    for (let i = 0; i < businesses.length; i += 5) {
+    for (let i = listStart; i < businesses.length; i += 5) {
       const batch = businesses.slice(i, i + 5);
 
       await Promise.all(batch.map(async (biz: any) => {
@@ -501,8 +965,9 @@ async function scrapeGoogleMaps(
 
         let website: string | null = null;
         let phone = biz.phone;
+        let email: string | null = null;
 
-        // Step 1: Open the Maps place page to get the website URL
+        // Step 1: Open the Maps place page — website, phone, and any visible email
         try {
           const p = await browser!.newPage();
           await p.setUserAgent(ua);
@@ -521,57 +986,117 @@ async function scrapeGoogleMaps(
                 }
               }
               const tel = document.querySelector<HTMLAnchorElement>('a[href^="tel:"]');
-              return { site, tel: tel?.textContent?.trim() ?? '' };
+              const mailtos: string[] = [];
+              for (const a of Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href^="mailto:"]'))) {
+                const e = a.href.replace(/^mailto:/i, '').split('?')[0]?.trim();
+                if (e) mailtos.push(e);
+              }
+              const bodyText = document.body?.innerText ?? '';
+              const textEmails = bodyText.match(
+                /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g
+              ) ?? [];
+              return {
+                site,
+                tel: tel?.textContent?.trim() ?? '',
+                emails: [...mailtos, ...textEmails],
+              };
             });
             website = d.site;
             if (d.tel) phone = d.tel;
+            if (d.emails?.length) {
+              email = bestEmail(extractEmails(d.emails.join(' ')));
+            }
           } finally { await p.close().catch(() => {}); }
         } catch {}
 
-        // Step 2: Fetch email from website IN PARALLEL with the above
-        // (website fetch starts as soon as we have the URL, no extra waiting)
-        let email: string | null = null;
-        if (website) {
-          email = await fetchEmailFromSite(website, biz.name, niche, location, aiProvider);
+        // Step 2: Fetch email from business website
+        if (!email && website) {
+          email = await fetchEmailFromSite(website, biz.name, niche, leadLocation, aiProvider);
         }
 
-        // Step 3: If still no email, try SMTP-based email guesser
+        // Step 3: Try inferred domain when Maps has no website link
+        if (!email && !website) {
+          for (const domain of inferDomainsFromName(biz.name, leadLocation).slice(0, 3)) {
+            const candidate = `https://${domain}`;
+            email = await fetchEmailFromSite(candidate, biz.name, niche, leadLocation, aiProvider);
+            if (email) {
+              website = candidate;
+              break;
+            }
+          }
+        }
+
+        // Step 4: SMTP-based email guesser on known domain
         if (!email && website) {
           try {
             const guesses = await guessAndVerifyEmails(website, {
-              companyName: biz.name, location, maxGuesses: 3, smtpVerify: false,
+              companyName: biz.name, location: leadLocation, maxGuesses: 5, smtpVerify: false,
             });
             if (guesses[0]) email = guesses[0].email;
           } catch {}
         }
 
         if (!email) {
+          const phoneStr = phone?.trim();
+          if (phoneStr && phoneStr.length >= 6) {
+            const phoneLead = finalizePhoneOnlyScrapeLead(
+              {
+                company_name: biz.name,
+                phone: phoneStr,
+                website: website || undefined,
+                business_address: biz.address?.trim(),
+                source_url: biz.placeUrl || website || '',
+                source_snippet: biz.address,
+              },
+              leadLocation
+            );
+            if (phoneLead && !isJunkScrapeLead({ ...phoneLead, phoneOnly: true }, leadLocation)) {
+              seen.add(biz.name.toLowerCase());
+              const payload: ScrapedLead = {
+                ...phoneLead,
+                niche,
+                source_url: biz.placeUrl || website || '',
+              };
+              if (onLead(payload)) leads.push(payload);
+              console.log(`  📞 ${biz.name} — call list (phone only)`);
+              return;
+            }
+          }
           console.log(`  ⏭  ${biz.name} — no email found`);
           return;
         }
 
         seen.add(biz.name.toLowerCase());
+        const enriched = await buildEnrichedLeadContext({
+          companyName: biz.name,
+          niche,
+          location: biz.address || leadLocation,
+          website: website || undefined,
+          phone: phone || undefined,
+          rating: biz.rating || undefined,
+        });
         const lead: ScrapedLead = {
           company_name: biz.name,
           email,
           emailIsReal: true,
-          niche,
-          location: biz.address || location,
-          company_context: `${biz.name} is a ${niche} in ${location}. ${biz.rating}`.trim(),
+          niche: enriched.niche,
+          location: leadLocation,
+          business_address: biz.address?.trim() || undefined,
+          company_context: enriched.context,
           source_url: biz.placeUrl || website || '',
           phone: phone || undefined,
           website: website || undefined,
         };
-        leads.push(lead);
-        onLead(lead);
-        console.log(`  ✅ ${biz.name} → ${email}`);
+        if (onLead(lead)) leads.push(lead);
       }));
     }
 
   } catch (err) {
     console.error('[Maps] Error:', err);
   } finally {
-    await browser?.close();
+    if (!browserFromPool) {
+      await browser?.close();
+    }
   }
 
   return leads;
@@ -581,8 +1106,9 @@ async function scrapeGoogleMaps(
 
 async function scrapeDirectories(
   niche: string, location: string, needed: number,
-  seen: Set<string>, onLead: (l: ScrapedLead) => void,
-  aiProvider: AIProviderConfig | null
+  seen: Set<string>, onLead: (l: ScrapedLead) => boolean,
+  aiProvider: AIProviderConfig | null,
+  round = 1
 ): Promise<ScrapedLead[]> {
   const leads: ScrapedLead[] = [];
 
@@ -624,16 +1150,21 @@ async function scrapeDirectories(
         const email = bestEmail(pageEmails) ?? null;
         if (!email) continue;
 
+        const enriched = await buildEnrichedLeadContext({
+          companyName: name,
+          niche,
+          location,
+        });
         const lead: ScrapedLead = {
           company_name: name,
           email,
           emailIsReal: true,
-          niche, location,
-          company_context: `${name} is a ${niche} in ${location}.`,
+          niche: enriched.niche,
+          location,
+          company_context: enriched.context,
           source_url: url,
         };
-        leads.push(lead);
-        onLead(lead);
+        if (onLead(lead)) leads.push(lead);
       }
 
       await delay(600);
@@ -659,19 +1190,52 @@ export async function scrapeWithoutAPI(
   location: string,
   maxLeads = 100,
   onLead?: (lead: ScrapedLead) => void,
-  aiProvider: AIProviderConfig | null = null
+  aiProvider: AIProviderConfig | null = null,
+  options?: ScrapeRunOptions
 ): Promise<ScrapedLead[]> {
+  const round = options?.round ?? 1;
+  const scrapeLocation = resolveScrapeLocationForRound(location, round);
   console.log(`\n${'='.repeat(60)}`);
-  console.log(`🚀 Scraping: "${niche}" in "${location}" (target: ${maxLeads})`);
+  console.log(
+    `🚀 Scraping: "${niche}" in "${scrapeLocation}" (target: ${maxLeads}${round > 1 ? `, round ${round}` : ""})` +
+      (scrapeLocation !== location ? ` [search area: ${location}]` : "")
+  );
   if (aiProvider) console.log(`🤖 AI-assisted: ${aiProvider.provider}/${aiProvider.active_model}`);
   console.log(`${'='.repeat(60)}\n`);
 
-  const all: ScrapedLead[] = [];
-  const seen = new Set<string>();
+  if (round === 1) {
+    const { resetScrapeAiSession, resetExpansionAiSession } = await import(
+      './ai-scrape-rate-limit'
+    );
+    resetScrapeAiSession();
+    resetExpansionAiSession();
+  }
 
-  const emit = (lead: ScrapedLead) => {
-    all.push(lead);
-    onLead?.(lead);
+  const all: ScrapedLead[] = [];
+  const seen = options?.seen ?? new Set<string>();
+
+  let junkSkipped = 0;
+  const emit = (lead: ScrapedLead): boolean => {
+    if (lead.phoneOnly) {
+      const finalized = finalizePhoneOnlyScrapeLead(lead, location);
+      if (!finalized || isJunkScrapeLead({ ...finalized, phoneOnly: true }, location)) {
+        junkSkipped++;
+        return false;
+      }
+      onLead?.(finalized);
+      console.log(`  📞 ${finalized.company_name} → call list @ ${finalized.location}`);
+      return true;
+    }
+    const finalized = finalizeScrapedLead(lead, location);
+    if (!finalized || isJunkScrapeLead(finalized, location)) {
+      junkSkipped++;
+      console.log(`  🗑  Junk skipped: ${lead.company_name} (${lead.email})`);
+      return false;
+    }
+    all.push(finalized);
+    onLead?.(finalized);
+    console.log(`  ✅ ${finalized.company_name} → ${finalized.email} @ ${finalized.location}`);
+    return true;
   };
 
   // For large targets (200+), give each source a bigger slice.
@@ -683,10 +1247,10 @@ export async function scrapeWithoutAPI(
 
   // All 4 sources run in parallel
   const [mapsRes, bingRes, ddgRes, dirRes] = await Promise.allSettled([
-    scrapeGoogleMaps(niche, location, mapsTarget, seen, emit, aiProvider),
-    scrapeBing(niche, location, bingTarget, seen, emit, aiProvider),
-    scrapeDDG(niche, location, ddgTarget, seen, emit, aiProvider),
-    scrapeDirectories(niche, location, dirTarget, seen, emit, aiProvider),
+    scrapeGoogleMapsMultiQuery(niche, scrapeLocation, location, mapsTarget, seen, emit, aiProvider, round),
+    scrapeBing(niche, scrapeLocation, bingTarget, seen, emit, aiProvider, round),
+    scrapeDDG(niche, scrapeLocation, ddgTarget, seen, emit, aiProvider, round),
+    scrapeDirectories(niche, scrapeLocation, dirTarget, seen, emit, aiProvider, round),
   ]);
 
   const counts = {
@@ -697,7 +1261,10 @@ export async function scrapeWithoutAPI(
   };
 
   console.log(`\n${'='.repeat(60)}`);
-  console.log(`📊 Results: ${all.length} leads | Maps:${counts.maps} Bing:${counts.bing} DDG:${counts.ddg} Dir:${counts.dir}`);
+  console.log(
+    `📊 Results: ${all.length} leads | Maps:${counts.maps} Bing:${counts.bing} DDG:${counts.ddg} Dir:${counts.dir}` +
+      (junkSkipped ? ` | ${junkSkipped} junk filtered` : "")
+  );
   console.log(`${'='.repeat(60)}\n`);
 
   // Deduplicate by email
@@ -708,4 +1275,4 @@ export async function scrapeWithoutAPI(
   return deduped.slice(0, maxLeads);
 }
 
-export { scrapeGoogleMaps };
+export { scrapeGoogleMaps, scrapeGoogleMapsMultiQuery };

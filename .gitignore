@@ -33,6 +33,13 @@ yarn-error.log*
 .env*.local
 .env
 
+# Scrape exports & spreadsheets (Maps CSV, verification logs, imports)
+*.csv
+*.xlsx
+*.xls
+*.xlsm
+gmapsdata/
+
 # vercel
 .vercel
 

@@ -78,7 +78,7 @@ export async function scrapeWebsitePuppeteer(
     });
 
     // Wait for JS to execute
-    await page.waitForTimeout(1500);
+    await new Promise((r) => setTimeout(r, 1500));
 
     // Extract content
     const content = await page.evaluate(() => {

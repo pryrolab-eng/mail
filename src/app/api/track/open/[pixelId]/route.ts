@@ -72,13 +72,17 @@ export async function GET(
       }
 
       // Log analytics event
-      await supabase.from("analytics_events").insert({
-        user_id: email.user_id,
-        event_type: "email_opened",
-        sent_email_id: email.id,
-        lead_id: email.lead_id ?? null,
-        metadata: { pixel_id: pixelId, ip: req.headers.get("x-forwarded-for") ?? "" },
-      }).catch(() => {});
+      try {
+        await supabase.from("analytics_events").insert({
+          user_id: email.user_id,
+          event_type: "email_opened",
+          sent_email_id: email.id,
+          lead_id: email.lead_id ?? null,
+          metadata: { pixel_id: pixelId, ip: req.headers.get("x-forwarded-for") ?? "" },
+        });
+      } catch {
+        /* analytics optional */
+      }
 
       console.log(`[track/open] ✅ Email ${email.id} marked as opened`);
     }

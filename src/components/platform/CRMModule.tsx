@@ -3,8 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { Lead, LeadStatus, LEAD_STATUSES } from "@/types/platform";
 import {
-  Mail, X, Loader2, Users, Send, MessageSquare,
-  TrendingUp, Save, Clock, Upload, Trash2, Filter,
+  Mail, X, Loader2, Users, Save, Clock, Upload, Trash2, Filter,
 } from "lucide-react";
 import { createClient } from "../../../supabase/client";
 import { toast } from "sonner";
@@ -173,20 +172,17 @@ export default function CRMModule({ userId, onWriteEmail }: CRMModuleProps) {
 
       {/* ── Top bar: stats + actions ─────────────────────────────────── */}
       <div className="flex items-center gap-4 px-5 py-3 border-b border-gray-200 flex-wrap">
-        {/* Stats */}
-        <div className="flex items-center gap-5 flex-1 min-w-0">
+        {/* Stats — same layout as Pipeline */}
+        <div className="flex items-center gap-4 flex-1 min-w-0 flex-wrap">
           {[
-            { label: "Total", value: stats.total, icon: Users },
-            { label: "Contacted", value: stats.contacted, icon: Send },
-            { label: "Replied", value: stats.replied, icon: MessageSquare },
-            { label: "Interested", value: stats.interested, icon: TrendingUp },
-          ].map(({ label, value, icon: Icon }) => (
-            <div key={label} className="flex items-center gap-2">
-              <Icon size={13} className="text-gray-400 flex-shrink-0" />
-              <div>
-                <p className="text-[10px] text-gray-400 leading-none">{label}</p>
-                <p className="text-sm font-bold text-gray-900 leading-tight">{value}</p>
-              </div>
+            { label: "Total", value: stats.total },
+            { label: "Contacted", value: stats.contacted },
+            { label: "Replied", value: stats.replied },
+            { label: "Interested", value: stats.interested },
+          ].map(({ label, value }) => (
+            <div key={label}>
+              <p className="text-[10px] text-gray-400 leading-none">{label}</p>
+              <p className="text-sm font-bold text-gray-900">{value}</p>
             </div>
           ))}
         </div>

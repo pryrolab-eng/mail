@@ -270,11 +270,15 @@ export async function POST(request: NextRequest) {
       }).eq("id", leadToUpdate.id);
 
       if (leadToUpdate.status !== "contacted") {
-        await service.from("lead_status_history").insert({
-          lead_id: leadToUpdate.id,
-          old_status: leadToUpdate.status,
-          new_status: "contacted",
-        }).then(() => {}).catch(() => {});
+        try {
+          await service.from("lead_status_history").insert({
+            lead_id: leadToUpdate.id,
+            old_status: leadToUpdate.status,
+            new_status: "contacted",
+          });
+        } catch {
+          /* history row is optional */
+        }
       }
     }
 

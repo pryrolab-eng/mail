@@ -13,16 +13,22 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "../../../../supabase/server";
 import { createServiceClient } from "../../../../supabase/service";
+import { resolveLeadIntel, serializeLeadIntelForStorage } from "@/utils/lead-intel";
+import { loadAIProviderForUser } from "@/utils/load-ai-provider-server";
 
 // ─── Email extraction ─────────────────────────────────────────────────────────
 
 function extractEmails(html: string): string[] {
   // Match mailto: links first (most reliable)
-  const mailtoMatches = [...html.matchAll(/mailto:([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})/gi)];
+  const mailtoMatches = Array.from(
+    html.matchAll(/mailto:([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})/gi)
+  );
   const mailtoEmails = mailtoMatches.map((m) => m[1].toLowerCase());
 
   // Then match plain email patterns in text
-  const textMatches = [...html.matchAll(/\b([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})\b/g)];
+  const textMatches = Array.from(
+    html.matchAll(/\b([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})\b/g)
+  );
   const textEmails = textMatches
     .map((m) => m[1].toLowerCase())
     .filter((e) => {
@@ -41,7 +47,7 @@ function extractEmails(html: string): string[] {
     });
 
   // Combine, deduplicate, prioritise mailto
-  const all = [...new Set([...mailtoEmails, ...textEmails])];
+  const all = Array.from(new Set(mailtoEmails.concat(textEmails)));
 
   // Score: prefer info/contact/hello over noreply/support
   const score = (email: string) => {
@@ -202,6 +208,7 @@ export async function POST(request: NextRequest) {
     let richContext = "";
     let pageTitle = "";
     let successUrl = "";
+    let websiteSnippet: { meta: string; title: string; sentences: string[] } | null = null;
 
     for (const url of urlsToTry) {
       const html = await fetchPage(url);
@@ -220,11 +227,30 @@ export async function POST(request: NextRequest) {
         const title = extractTitle(html);
         pageTitle = title;
         richContext = buildContext(companyName, title, meta, text, niche, location);
+        const sentences = text
+          .split(/[.!?]+/)
+          .map((s) => s.trim())
+          .filter((s) => s.length > 45 && s.length < 220)
+          .slice(0, 2);
+        websiteSnippet = { meta, title, sentences };
       }
 
       // Stop if we have both email and context
       if (foundEmails.length > 0 && richContext) break;
     }
+
+    const aiProvider = await loadAIProviderForUser(supabase);
+    const leadIntel = await resolveLeadIntel(
+      {
+        company_name: companyName,
+        niche,
+        location,
+        company_context: richContext,
+        website: successUrl || website,
+      },
+      { aiProvider, useAi: !!aiProvider }
+    );
+    richContext = serializeLeadIntelForStorage(leadIntel);
 
     // ── Determine best email ─────────────────────────────────────────────────
     const bestEmail = foundEmails[0] ?? null;
@@ -234,8 +260,16 @@ export async function POST(request: NextRequest) {
       const service = createServiceClient();
       const updates: Record<string, string> = {};
 
-      if (bestEmail) updates.email = bestEmail;
+      if (bestEmail) {
+        updates.email = bestEmail;
+        updates.email_source = "website_crawl";
+        updates.email_confidence = "high";
+        updates.pipeline_stage = "scraped";
+        updates.pipeline_updated_at = new Date().toISOString();
+      }
       if (richContext) updates.company_context = richContext;
+      if (successUrl) updates.website = successUrl;
+      if (successUrl && !website) updates.website = successUrl;
       if (Object.keys(updates).length > 0) {
         updates.updated_at = new Date().toISOString();
         await service
@@ -251,7 +285,10 @@ export async function POST(request: NextRequest) {
       email: bestEmail,
       allEmails: foundEmails,
       company_context: richContext || null,
+      leadIntel,
+      intelSource: leadIntel.source,
       pageTitle,
+      website: successUrl || null,
       sourceUrl: successUrl || null,
       enriched: !!(bestEmail || richContext),
     });

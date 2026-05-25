@@ -54,13 +54,17 @@ export async function GET(
             .eq("id", email.lead_id);
         }
 
-        await supabase.from("analytics_events").insert({
-          user_id: email.user_id,
-          event_type: "email_clicked",
-          sent_email_id: email.id,
-          lead_id: email.lead_id ?? null,
-          metadata: { track_id: trackId, destination: safeDestination },
-        }).catch(() => {});
+        try {
+          await supabase.from("analytics_events").insert({
+            user_id: email.user_id,
+            event_type: "email_clicked",
+            sent_email_id: email.id,
+            lead_id: email.lead_id ?? null,
+            metadata: { track_id: trackId, destination: safeDestination },
+          });
+        } catch {
+          /* analytics optional */
+        }
 
         console.log(`[track/click] ✅ Email ${email.id} marked as clicked → ${safeDestination}`);
       }

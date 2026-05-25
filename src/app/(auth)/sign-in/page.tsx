@@ -2,6 +2,7 @@ import { signInAction } from "@/app/actions";
 import { FormMessage, Message } from "@/components/form-message";
 import { SubmitButton } from "@/components/submit-button";
 import { Input } from "@/components/ui/input";
+import { PasswordInput } from "@/components/ui/password-input";
 import { Label } from "@/components/ui/label";
 import Link from "next/link";
 import { Zap } from "lucide-react";
@@ -68,9 +69,8 @@ export default async function SignInPage({ searchParams }: LoginProps) {
                     Forgot password?
                   </Link>
                 </div>
-                <Input
+                <PasswordInput
                   id="password"
-                  type="password"
                   name="password"
                   placeholder="••••••••"
                   required

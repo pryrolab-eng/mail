@@ -10,6 +10,8 @@ import {
 } from "lucide-react";
 import { createClient } from "../../../supabase/client";
 import { toast } from "sonner";
+import { DEFAULT_YOUR_COMPANY } from "@/utils/email-prompts";
+import { isWeakLeadContext } from "@/utils/lead-context-builder";
 
 interface EmailWriterProps {
   userId: string;
@@ -30,9 +32,22 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
   const [categories, setCategories] = useState<string[]>([]);
   const [mode, setMode]             = useState<"single" | "bulk" | "manual">("single");
 
-  // ── Sender profile — hardcoded as Pryro ─────────────────────────────────
-  const yourCompany = "Pryro";
-  const yourService = "ERP platform that replaces Excel-based operations and manual workflows with a unified system — we offer a 20–30% commission for every successfully referred client";
+  const [yourCompany, setYourCompany] = useState(DEFAULT_YOUR_COMPANY);
+  const [yourService, setYourService] = useState("");
+  const [pryroProfileLoading, setPryroProfileLoading] = useState(true);
+
+  useEffect(() => {
+    fetch("/api/pryro-profile")
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.offerFormatted || data.serviceOffer) {
+          setYourService(data.offerFormatted || data.serviceOffer);
+        }
+        if (data.company) setYourCompany(data.company);
+      })
+      .catch(() => toast.error("Could not load Pryro info from website"))
+      .finally(() => setPryroProfileLoading(false));
+  }, []);
 
   // ── Single mode ───────────────────────────────────────────────────────────
   const [selectedLead, setSelectedLead]       = useState<Lead | null>(preloadedLead || null);
@@ -144,17 +159,33 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
   // ── Single: generate ──────────────────────────────────────────────────────
   const generateEmail = async () => {
     if (!selectedLead) { toast.error("Select a lead first"); return; }
+    if (!yourService) {
+      toast.error(pryroProfileLoading ? "Loading Pryro website info…" : "Pryro website profile unavailable");
+      return;
+    }
     setIsGenerating(true);
     setGeneratedEmail(null);
     setIsEditing(false);
     try {
+      let leadForGen = selectedLead;
+      if (
+        isWeakLeadContext(selectedLead.company_context, selectedLead.company_name) &&
+        (selectedLead.website || selectedLead.company_name)
+      ) {
+        toast.info("Enriching lead first for a stronger email…");
+        const enriched = await enrichLead(selectedLead);
+        if (enriched) leadForGen = enriched;
+      }
+
       const { generateAIEmail } = await import("@/utils/ai-email-generator");
-      const { subject, body } = await generateAIEmail({
+      const { subject, body, quality } = await generateAIEmail({
         lead: {
-          company_name: selectedLead.company_name,
-          niche: selectedLead.niche,
-          location: selectedLead.location,
-          company_context: selectedLead.company_context,
+          company_name: leadForGen.company_name,
+          niche: leadForGen.niche,
+          location: leadForGen.location,
+          company_context: leadForGen.company_context,
+          website: leadForGen.website,
+          phone: leadForGen.phone,
         },
         yourCompany,
         yourService,
@@ -165,6 +196,14 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
       setGeneratedEmail({ subject, body, model: "AI" });
       setEditSubject(subject);
       setEditBody(body);
+      if (quality.isGeneric) {
+        toast.warning(
+          `Email may sound generic (score ${quality.score}/10). Enrich the lead or edit before sending.`,
+          { duration: 6000 }
+        );
+      } else if (quality.score >= 8) {
+        toast.success(`Strong draft (${quality.score}/10)`);
+      }
     } catch (err: any) {
       toast.error(err.message || "Failed to generate email. Check AI settings.");
     } finally {
@@ -172,7 +211,7 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
     }
   };
 
-  const enrichLead = async (lead: Lead) => {
+  const enrichLead = async (lead: Lead): Promise<Lead | null> => {
     setIsEnriching(true);
     setEnriched(false);
     try {
@@ -191,14 +230,15 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
       
       if (!data.success) {
         toast.error(data.error || "Enrichment failed");
-        return;
+        return null;
       }
       
       if (data.enriched) {
         const updated: Lead = { 
           ...lead, 
           email: data.email ?? lead.email, 
-          company_context: data.company_context ?? lead.company_context 
+          company_context: data.company_context ?? lead.company_context,
+          website: data.website ?? data.sourceUrl ?? lead.website,
         };
         setSelectedLead(updated);
         setLeads((prev) => prev.map((l) => (l.id === lead.id ? updated : l)));
@@ -211,13 +251,16 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
         } else {
           toast.info("Enriched, but no new email found");
         }
+        return updated;
       } else {
         setEnriched(true);
         toast.warning("No email found on website. Try using a custom email.");
+        return lead;
       }
     } catch (err) {
       console.error("Enrichment error:", err);
       toast.error("Failed to enrich lead");
+      return null;
     } finally { 
       setIsEnriching(false); 
     }
@@ -335,6 +378,10 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
 
   const generateBulkEmails = async () => {
     if (selectedLeadIds.size === 0) { toast.error("Select at least one lead"); return; }
+    if (!yourService) {
+      toast.error(pryroProfileLoading ? "Loading Pryro website info…" : "Pryro website profile unavailable");
+      return;
+    }
 
     const selected = leads.filter((l) => selectedLeadIds.has(l.id));
     const withEmail = selected.filter(l => l.email && l.email.trim());
@@ -363,7 +410,11 @@ export default function EmailWriterModule({ userId, preloadedLead }: EmailWriter
             location: l.location,
             company_context: l.company_context,
             email: l.email,
+            website: l.website ?? null,
+            phone: l.phone ?? null,
+            email_confidence: l.email_confidence ?? null,
           })),
+          minEmailConfidence: "medium",
           yourCompany,
           yourService,
           tone: bulkTone,

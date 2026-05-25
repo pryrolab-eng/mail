@@ -1,12 +1,14 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
+import { toast } from "sonner";
 import { ActiveModule, Lead, ScrapedLead } from "@/types/platform";
 import PlatformSidebar from "./PlatformSidebar";
 import TopBar from "./TopBar";
 import ScraperModule from "./ScraperModule";
 import EmailWriterModule from "./EmailWriterModule";
 import CRMModule from "./CRMModule";
+import PipelineModule from "./PipelineModule";
 import AISettingsModule from "./AISettingsModule";
 import SMTPManager from "./SMTPManager";
 import FollowUpModule from "./FollowUpModule";
@@ -29,9 +31,27 @@ export default function PlatformLayout({ userId, userEmail }: PlatformLayoutProp
   const [activeModule, setActiveModule] = useState<ActiveModule>("scraper");
   const [preloadedLead, setPreloadedLead] = useState<Lead | null>(null);
   const [crmRefreshKey, setCrmRefreshKey] = useState(0);
+  const [pipelineRefreshKey, setPipelineRefreshKey] = useState(0);
+  const [pipelineActionCount, setPipelineActionCount] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const router = useRouter();
   const supabase = createClient();
+
+  const fetchPipelineActionCount = useCallback(async () => {
+    const { count, error } = await supabase
+      .from("leads")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", userId)
+      .in("pipeline_stage", ["scraped", "researched", "email_drafted"]);
+
+    if (!error && count != null) {
+      setPipelineActionCount(count);
+    }
+  }, [userId, supabase]);
+
+  useEffect(() => {
+    fetchPipelineActionCount();
+  }, [fetchPipelineActionCount, pipelineRefreshKey]);
 
   const handleLogout = async () => {
     await supabase.auth.signOut();
@@ -46,9 +66,9 @@ export default function PlatformLayout({ userId, userEmail }: PlatformLayoutProp
         user_id: userId,
         company_name: lead.company_name,
         email: lead.email,
-        niche: lead.niche,
+        niche: lead.niche ?? null,
         location: lead.location,
-        company_context: lead.company_context,
+        company_context: lead.company_context ?? null,
         status: "new",
         notes: null,
         category: null,
@@ -66,8 +86,23 @@ export default function PlatformLayout({ userId, userEmail }: PlatformLayoutProp
     setActiveModule("email-writer");
   };
 
-  const handleLeadsAdded = () => {
+  const handleLeadsAdded = (addedCount?: number) => {
     setCrmRefreshKey((k) => k + 1);
+    setPipelineRefreshKey((k) => k + 1);
+    fetchPipelineActionCount();
+
+    const n = addedCount && addedCount > 0 ? addedCount : undefined;
+    toast.success(
+      n
+        ? `${n} lead${n === 1 ? "" : "s"} added — open Pipeline to continue`
+        : "Leads added — open Pipeline to continue",
+      {
+        action: {
+          label: "Open Pipeline",
+          onClick: () => handleModuleChange("pipeline"),
+        },
+      }
+    );
   };
 
   const handleModuleChange = (module: ActiveModule) => {
@@ -96,7 +131,11 @@ export default function PlatformLayout({ userId, userEmail }: PlatformLayoutProp
           ${sidebarOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"}
         `}
       >
-        <PlatformSidebar activeModule={activeModule} onModuleChange={handleModuleChange} />
+        <PlatformSidebar
+          activeModule={activeModule}
+          onModuleChange={handleModuleChange}
+          pipelineActionCount={pipelineActionCount}
+        />
       </div>
 
       {/* Main content area */}
@@ -116,6 +155,18 @@ export default function PlatformLayout({ userId, userEmail }: PlatformLayoutProp
               userId={userId}
               onLeadsAdded={handleLeadsAdded}
               onGenerateEmails={handleGenerateEmailFromScraper}
+              onOpenAiSettings={() => setActiveModule("ai-settings")}
+            />
+          </div>
+
+          <div className={activeModule === "pipeline" ? "block h-full" : "hidden"}>
+            <PipelineModule
+              key={pipelineRefreshKey}
+              userId={userId}
+              onPipelineChange={() => {
+                fetchPipelineActionCount();
+                setCrmRefreshKey((k) => k + 1);
+              }}
             />
           </div>
 
@@ -136,9 +187,9 @@ export default function PlatformLayout({ userId, userEmail }: PlatformLayoutProp
             />
           </LazyModule>
 
-          <LazyModule active={activeModule === "ai-settings"}>
+          <div className={activeModule === "ai-settings" ? "block h-full" : "hidden"}>
             <AISettingsModule userId={userId} />
-          </LazyModule>
+          </div>
 
           <LazyModule active={activeModule === "smtp-manager"}>
             <SMTPManager userId={userId} />

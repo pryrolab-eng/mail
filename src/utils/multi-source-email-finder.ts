@@ -315,6 +315,23 @@ export async function findRealEmail(
     Promise.all(searchPromises),
     new Promise(resolve => setTimeout(resolve, timeout)),
   ]);
+
+  // CommonCrawl fallback when live website scrape found nothing
+  if (useWebsite && website && allEmails.size === 0) {
+    try {
+      const domain = website.replace(/^https?:\/\//i, '').replace(/^www\./i, '').split('/')[0];
+      const { findEmailsForDomain } = await import('./free-email-finder');
+      const ccHits = await findEmailsForDomain(domain, companyName);
+      const ccEmails = ccHits.map((h) => h.email);
+      if (ccEmails.length > 0) {
+        ccEmails.forEach((e) => allEmails.add(e));
+        sources.push('commoncrawl');
+        console.log(`[CommonCrawl] Found ${ccEmails.length} email(s) for ${domain}`);
+      }
+    } catch {
+      /* best-effort */
+    }
+  }
   
   const emailArray = Array.from(allEmails);
   const bestEmail = findBestEmail(emailArray);

@@ -1,39 +1,77 @@
 "use client";
 
 import { ActiveModule } from "@/types/platform";
-import { Radio, Mail, Settings, Layout, Server, Send, Megaphone } from "lucide-react";
+import { Radio, Mail, Settings, Layout, Server, Send, Megaphone, Workflow } from "lucide-react";
 
 interface SidebarProps {
   activeModule: ActiveModule;
   onModuleChange: (module: ActiveModule) => void;
+  /** Leads needing Research / Generate / Send */
+  pipelineActionCount?: number;
 }
 
-const navGroups = [
-  {
-    label: "Outreach",
-    items: [
-      { id: "scraper" as ActiveModule,       label: "Scraper",      icon: Radio,        badge: null },
-      { id: "email-writer" as ActiveModule,  label: "Email Writer", icon: Mail,         badge: null },
-      { id: "campaigns" as ActiveModule,     label: "Campaigns",    icon: Megaphone,    badge: null },
-      { id: "follow-up" as ActiveModule,     label: "Follow-Up",    icon: Send,         badge: null },
-    ],
-  },
-  {
-    label: "Management",
-    items: [
-      { id: "crm" as ActiveModule,           label: "CRM",          icon: Layout,       badge: null },
-    ],
-  },
-  {
-    label: "Settings",
-    items: [
-      { id: "smtp-manager" as ActiveModule,  label: "SMTP Manager", icon: Server,       badge: null },
-      { id: "ai-settings" as ActiveModule,   label: "AI Settings",  icon: Settings,     badge: null },
-    ],
-  },
-];
+function buildNavGroups(pipelineActionCount: number) {
+  const pipelineBadge =
+    pipelineActionCount > 0 ? String(pipelineActionCount) : null;
 
-export default function PlatformSidebar({ activeModule, onModuleChange }: SidebarProps) {
+  return [
+    {
+      label: "Outreach",
+      items: [
+        { id: "scraper" as ActiveModule, label: "Scraper", icon: Radio, badge: null },
+        {
+          id: "pipeline" as ActiveModule,
+          label: "Pipeline",
+          icon: Workflow,
+          badge: pipelineBadge,
+        },
+        {
+          id: "email-writer" as ActiveModule,
+          label: "Email Writer",
+          icon: Mail,
+          badge: null,
+        },
+        {
+          id: "campaigns" as ActiveModule,
+          label: "Campaigns",
+          icon: Megaphone,
+          badge: null,
+        },
+        { id: "follow-up" as ActiveModule, label: "Follow-Up", icon: Send, badge: null },
+      ],
+    },
+    {
+      label: "Management",
+      items: [
+        { id: "crm" as ActiveModule, label: "CRM", icon: Layout, badge: null },
+      ],
+    },
+    {
+      label: "Settings",
+      items: [
+        {
+          id: "smtp-manager" as ActiveModule,
+          label: "SMTP Manager",
+          icon: Server,
+          badge: null,
+        },
+        {
+          id: "ai-settings" as ActiveModule,
+          label: "AI Settings",
+          icon: Settings,
+          badge: null,
+        },
+      ],
+    },
+  ];
+}
+
+export default function PlatformSidebar({
+  activeModule,
+  onModuleChange,
+  pipelineActionCount = 0,
+}: SidebarProps) {
+  const navGroups = buildNavGroups(pipelineActionCount);
   return (
     <aside className="w-[200px] flex-shrink-0 flex flex-col bg-white border-r border-gray-200 h-full">
       {/* Logo */}

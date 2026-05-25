@@ -33,6 +33,27 @@ export const LEAD_STATUSES: { value: LeadStatus; label: string; color: string; b
   { value: 'failed',     label: 'Failed',     color: '#DC2626', bg: '#FEE2E2' },
 ];
 
+// ─── Pipeline stage (leads.pipeline_stage) ────────────────────────────────────
+
+export type PipelineStage =
+  | 'scraped'
+  | 'call_list'
+  | 'researched'
+  | 'email_drafted'
+  | 'sent'
+  | 'replied'
+  | 'failed';
+
+export const PIPELINE_STAGES: PipelineStage[] = [
+  'scraped',
+  'call_list',
+  'researched',
+  'email_drafted',
+  'sent',
+  'replied',
+  'failed',
+];
+
 // ─── Lead ─────────────────────────────────────────────────────────────────────
 
 export interface Lead {
@@ -53,6 +74,11 @@ export interface Lead {
   confidence_score?: number | null;
   email_verified?: boolean | null;
   last_contacted_at?: string | null;
+  pipeline_stage?: PipelineStage | null;
+  pipeline_updated_at?: string | null;
+  pipeline_error?: string | null;
+  email_source?: string | null;
+  email_confidence?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -62,14 +88,25 @@ export interface Lead {
 export interface ScrapedLead {
   company_name: string;
   email: string;
+  /** Maps row with phone but no email — saved to CRM as call_list */
+  phoneOnly?: boolean;
   emailIsReal?: boolean;
-  niche: string;
+  niche?: string;
+  /** Search target (e.g. "Kigali, Rwanda") — not necessarily where the business is */
   location: string;
-  company_context: string;
+  company_context?: string;
   source_url?: string;
   phone?: string;
   website?: string;
   confidence_score?: number;
+  /** Maps listing address */
+  business_address?: string;
+  source_snippet?: string;
+  email_from_csv?: string;
+  email_from_website?: string;
+  email_verify_status?: string;
+  email_source?: string;
+  email_confidence?: string;
 }
 
 // ─── Generated Email ──────────────────────────────────────────────────────────
@@ -350,6 +387,7 @@ export interface EmailInboxConfig {
 
 export type ActiveModule =
   | 'scraper'
+  | 'pipeline'
   | 'email-writer'
   | 'crm'
   | 'ai-settings'

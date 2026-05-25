@@ -45,7 +45,7 @@ export default function BulkEmailSender({ userId, selectedLeads, onComplete }: B
       );
 
       if (result.success) {
-        setGeneratedEmails(result.emails);
+        setGeneratedEmails(result.emails ?? []);
         setStep('preview');
         toast.success(`Generated ${result.count} personalized emails!`);
       } else {

@@ -1,0 +1,22 @@
+# Optional Maps backend for the mail app scraper (gosom/google-maps-scraper).
+# Usage:
+#   docker compose -f docker-compose.gmaps.yml up -d
+#   Add to .env: GMAPS_SCRAPER_URL=http://localhost:8080
+# Web UI + API: http://localhost:8080  — OpenAPI: http://localhost:8080/api/docs
+
+services:
+  gmaps-scraper:
+    image: gosom/google-maps-scraper:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      - gmaps-playwright-cache:/opt
+      - ./gmapsdata:/gmapsdata
+    command:
+      - -data-folder
+      - /gmapsdata
+      - -email
+    restart: unless-stopped
+
+volumes:
+  gmaps-playwright-cache:

@@ -328,9 +328,22 @@ CREATE POLICY "Users can delete their own templates"
 -- PART 6: Enable Realtime (Optional)
 -- ============================================
 
--- Enable Realtime for tables that need live updates
-ALTER PUBLICATION supabase_realtime ADD TABLE public.leads;
-ALTER PUBLICATION supabase_realtime ADD TABLE public.generated_emails;
-ALTER PUBLICATION supabase_realtime ADD TABLE public.ai_settings;
-ALTER PUBLICATION supabase_realtime ADD TABLE email_queue;
-ALTER PUBLICATION supabase_realtime ADD TABLE email_campaigns;
+-- Enable Realtime for tables that need live updates (idempotent)
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_publication_tables WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'leads') THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.leads;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_publication_tables WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'generated_emails') THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.generated_emails;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_publication_tables WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'ai_settings') THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.ai_settings;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_publication_tables WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'email_queue') THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.email_queue;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_publication_tables WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'email_campaigns') THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.email_campaigns;
+  END IF;
+END $$;

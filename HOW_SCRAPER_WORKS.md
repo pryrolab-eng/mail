@@ -209,3 +209,54 @@ The issue isn't the scraper - it's that:
 3. Rwanda websites can be slow to load
 
 **Your scraper is doing exactly what you asked - visiting websites, checking contact pages and footers, and extracting real emails!** ✅
+
+---
+
+## Environment & Maps backend (`.env`)
+
+### Optional Docker Maps (gosom)
+
+Faster/deeper Google Maps when the gosom container is running:
+
+```bash
+docker compose -f docker-compose.gmaps.yml up -d
+```
+
+In `.env`:
+
+```env
+GMAPS_SCRAPER_URL=http://localhost:8080
+GMAPS_SCRAPER_MAX_DEPTH=5
+```
+
+- **Docker online:** Maps uses gosom; Bing, DuckDuckGo, directories, and website email crawl still use HTTP (not Puppeteer for Maps).
+- **`GMAPS_SCRAPER_URL` set but server offline:** Maps falls back to Puppeteer automatically. Start Docker with the command above.
+- **No `GMAPS_SCRAPER_URL`:** Maps uses Puppeteer only.
+
+The scraper UI shows a small badge (Docker / Puppeteer / offline) next to the search form — no extra banners.
+
+### Bing & DuckDuckGo (no paid API required)
+
+**Default (free):** Bing and DuckDuckGo use HTTP first, then **automatic browser retry** when results are blocked or empty. Website enrich also uses the **Maps place link** + **browser fetch** for JS-heavy sites — no API key needed.
+
+If DuckDuckGo still returns **0 leads**, add this free option (slower, uses local Chrome):
+
+```env
+SEARCH_USE_PUPPETEER=ddg
+```
+
+**Optional paid add-on** (not required): `BRAVE_SEARCH_API_KEY` — only if you want a paid search API when free Bing/DDG are unreliable.
+
+### Other useful scraper env vars
+
+| Variable | Purpose |
+|----------|---------|
+| `GMAPS_DOCKER_WEBSITE_EMAIL_VERIFY` | Crawl business sites to compare CSV vs website email (default on) |
+| `GMAPS_DOCKER_NO_WEBSITE_ENRICH` | Bing + domain guess when CSV has no website (default on) |
+| `GMAPS_DOCKER_AI_EMAIL_PICK` | Use AI Settings LLM to pick email when candidates disagree (default on) |
+| `GMAPS_DOCKER_AI_EMAIL_PICK=false` | Disable AI email pick during Maps scrape |
+| `WEBSITE_FETCH_PUPPETEER` | When HTTP crawl finds no email, retry key pages in headless Chrome (default on) |
+| `WEBSITE_FETCH_PUPPETEER=false` | HTTP only — fails on many JS sites you see in a normal browser |
+| `SCRAPE_BROWSER_POOL` | **On by default** — one shared Chrome per scrape job (Maps + site fallback + place links); set `false` to launch/close per URL |
+| `GMAPS_MAPS_LINK_WEBSITE` | Read website from Google Maps place URL when CSV `website` is empty (default on) |
+| `BRAVE_SEARCH_API_KEY` | Optional paid Brave Search API — skip unless you already have a key |

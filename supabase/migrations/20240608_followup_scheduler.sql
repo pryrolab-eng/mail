@@ -52,21 +52,18 @@ CREATE INDEX IF NOT EXISTS idx_followup_queue_sent_email_id
 -- RLS
 ALTER TABLE public.followup_queue ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users can view their own followup queue" ON public.followup_queue;
 CREATE POLICY "Users can view their own followup queue"
-  ON public.followup_queue FOR SELECT
-  USING (auth.uid() = user_id);
-
+  ON public.followup_queue FOR SELECT USING (auth.uid() = user_id);
+DROP POLICY IF EXISTS "Users can insert their own followup queue" ON public.followup_queue;
 CREATE POLICY "Users can insert their own followup queue"
-  ON public.followup_queue FOR INSERT
-  WITH CHECK (auth.uid() = user_id);
-
+  ON public.followup_queue FOR INSERT WITH CHECK (auth.uid() = user_id);
+DROP POLICY IF EXISTS "Users can update their own followup queue" ON public.followup_queue;
 CREATE POLICY "Users can update their own followup queue"
-  ON public.followup_queue FOR UPDATE
-  USING (auth.uid() = user_id);
-
+  ON public.followup_queue FOR UPDATE USING (auth.uid() = user_id);
+DROP POLICY IF EXISTS "Users can delete their own followup queue" ON public.followup_queue;
 CREATE POLICY "Users can delete their own followup queue"
-  ON public.followup_queue FOR DELETE
-  USING (auth.uid() = user_id);
+  ON public.followup_queue FOR DELETE USING (auth.uid() = user_id);
 
 -- updated_at trigger
 CREATE OR REPLACE FUNCTION update_followup_queue_updated_at()

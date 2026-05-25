@@ -16,65 +16,14 @@ import {
 } from "lucide-react";
 import { createClient } from "../../../supabase/client";
 import { toast } from "sonner";
+import { AI_PROVIDER_DEFINITIONS } from "@/config/ai-providers";
+import type { ModelsListSource } from "@/utils/fetch-provider-models";
 
 interface AISettingsProps {
   userId: string;
 }
 
-const PROVIDERS = [
-  {
-    key: "groq",
-    name: "Groq",
-    color: "#2563EB",
-    models: [
-      "llama-3.3-70b-versatile",
-      "llama-3.1-8b-instant",
-      "openai/gpt-oss-120b",
-      "openai/gpt-oss-20b",
-      "groq/compound"
-    ],
-    icon: "⚡",
-    tagline: "Fastest inference engine",
-  },
-  {
-    key: "openai",
-    name: "OpenAI",
-    color: "#2563EB",
-    models: ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"],
-    icon: "◎",
-    tagline: "Most capable models",
-  },
-  {
-    key: "anthropic",
-    name: "Anthropic",
-    color: "#2563EB",
-    models: [
-      "claude-3-5-sonnet-20241022",
-      "claude-3-5-haiku-20241022",
-      "claude-3-opus-20240229",
-      "claude-3-sonnet-20240229",
-      "claude-3-haiku-20240307"
-    ],
-    icon: "Ⲁ",
-    tagline: "Best for nuanced writing",
-  },
-  {
-    key: "gemini",
-    name: "Google Gemini",
-    color: "#2563EB",
-    models: ["gemini-1.5-pro", "gemini-1.5-flash", "gemini-pro"],
-    icon: "◆",
-    tagline: "Multimodal intelligence",
-  },
-  {
-    key: "mistral",
-    name: "Mistral AI",
-    color: "#2563EB",
-    models: ["mistral-large", "mistral-medium", "mistral-small", "open-mixtral-8x7b"],
-    icon: "▲",
-    tagline: "European open AI",
-  },
-];
+const PROVIDERS = AI_PROVIDER_DEFINITIONS;
 
 export default function AISettingsModule({ userId }: AISettingsProps) {
   const [settings, setSettings] = useState<Record<string, AIProvider>>({});
@@ -85,36 +34,158 @@ export default function AISettingsModule({ userId }: AISettingsProps) {
   const [activeProvider, setActiveProvider] = useState<string>("");
   const [activeModel, setActiveModel] = useState<string>("");
   const [modelDropdownOpen, setModelDropdownOpen] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [liveModels, setLiveModels] = useState<Record<string, string[]>>({});
+  const [modelsSource, setModelsSource] = useState<Record<string, ModelsListSource>>({});
+  const [savedModelDeprecated, setSavedModelDeprecated] = useState<Record<string, boolean>>({});
+  const [loadingModels, setLoadingModels] = useState<Record<string, boolean>>({});
+  const [initialLoading, setInitialLoading] = useState(true);
 
   const supabase = createClient();
 
   useEffect(() => {
-    fetchSettings();
+    void loadSettings(true);
   }, []);
 
-  const fetchSettings = async () => {
-    setLoading(true);
+  const fetchProviderModels = async (providerKey: string, apiKey?: string) => {
+    const key =
+      apiKey?.trim() ||
+      keyInputs[providerKey]?.trim() ||
+      settings[providerKey]?.api_key?.trim();
+    if (!key) return;
+
+    setLoadingModels((prev) => ({ ...prev, [providerKey]: true }));
+    try {
+      const res = await fetch("/api/ai-settings/models", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider: providerKey,
+          apiKey: key,
+          savedModel: settings[providerKey]?.active_model,
+        }),
+      });
+      const data = (await res.json()) as {
+        models?: string[];
+        source?: ModelsListSource;
+        error?: string;
+        savedDeprecated?: boolean;
+      };
+      const models = Array.isArray(data.models) ? data.models : [];
+      setLiveModels((prev) => ({ ...prev, [providerKey]: models }));
+      setModelsSource((prev) => ({
+        ...prev,
+        [providerKey]: data.source === "live" ? "live" : "fallback",
+      }));
+      setSavedModelDeprecated((prev) => ({
+        ...prev,
+        [providerKey]: !!data.savedDeprecated,
+      }));
+      if (data.source === "fallback" && data.error) {
+        toast.message(`Using fallback model list for ${providerKey}`, {
+          description: data.error.slice(0, 100),
+        });
+      }
+    } catch (err) {
+      toast.error("Could not load models", {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setLoadingModels((prev) => ({ ...prev, [providerKey]: false }));
+    }
+  };
+
+  const openModelDropdown = async (providerKey: string) => {
+    const next = modelDropdownOpen === providerKey ? null : providerKey;
+    setModelDropdownOpen(next);
+    if (next === providerKey && !liveModels[providerKey]?.length) {
+      await fetchProviderModels(providerKey);
+    }
+  };
+
+  const getModelsForProvider = (providerKey: string): string[] => {
+    const live = liveModels[providerKey];
+    if (live?.length) return live;
+    return (
+      PROVIDERS.find((p) => p.key === providerKey)?.fallbackModels ?? []
+    );
+  };
+
+  const applySettingsRows = (rows: AIProvider[], options?: { syncKeyInputs?: boolean }) => {
+    const map: Record<string, AIProvider> = {};
+    let nextActive = "";
+    let nextModel = "";
+
+    rows.forEach((s) => {
+      map[s.provider] = s;
+      if (s.is_active) {
+        nextActive = s.provider;
+        nextModel = s.active_model || "";
+      }
+    });
+
+    setSettings(map);
+    if (nextActive) {
+      setActiveProvider(nextActive);
+      setActiveModel(nextModel);
+    } else {
+      setActiveProvider("");
+      setActiveModel("");
+    }
+
+    if (options?.syncKeyInputs) {
+      setKeyInputs((prev) => {
+        const next = { ...prev };
+        rows.forEach((s) => {
+          if (s.api_key) next[s.provider] = s.api_key;
+        });
+        return next;
+      });
+    }
+  };
+
+  /** Load from DB without blanking the UI (except first visit). */
+  const loadSettings = async (isFirstLoad = false) => {
+    if (isFirstLoad) setInitialLoading(true);
+
     const { data } = await supabase
       .from("ai_settings")
       .select("*")
       .eq("user_id", userId);
 
-    if (data) {
-      const map: Record<string, AIProvider> = {};
-      data.forEach((s: AIProvider) => {
-        map[s.provider] = s;
-        if (s.is_active) {
-          setActiveProvider(s.provider);
-          setActiveModel(s.active_model || "");
+    if (data?.length) {
+      applySettingsRows(data, { syncKeyInputs: isFirstLoad });
+      if (isFirstLoad) {
+        for (const s of data) {
+          if (s.is_connected && s.api_key) {
+            void fetchProviderModels(s.provider, s.api_key);
+          }
         }
-        if (s.api_key) {
-          setKeyInputs((prev) => ({ ...prev, [s.provider]: s.api_key! }));
-        }
-      });
-      setSettings(map);
+      }
     }
-    setLoading(false);
+
+    if (isFirstLoad) setInitialLoading(false);
+  };
+
+  const patchProviderSetting = (
+    providerKey: string,
+    patch: Partial<AIProvider> & { provider: string }
+  ) => {
+    setSettings((prev) => {
+      const existing = prev[providerKey];
+      const merged = {
+        ...(existing ?? {
+          id: patch.id ?? "",
+          user_id: userId,
+          provider: providerKey,
+          api_key: null,
+          active_model: null,
+          is_active: false,
+          is_connected: false,
+        }),
+        ...patch,
+      } as AIProvider;
+      return { ...prev, [providerKey]: merged };
+    });
   };
 
   const saveKey = async (providerKey: string) => {
@@ -141,8 +212,21 @@ export default function AISettingsModule({ userId }: AISettingsProps) {
         });
       }
       toast.success("API key saved");
-      await fetchSettings();
-      // Auto-test after save
+      if (existing) {
+        patchProviderSetting(providerKey, {
+          ...existing,
+          api_key: key,
+          is_connected: false,
+        });
+      } else {
+        const { data: inserted } = await supabase
+          .from("ai_settings")
+          .select("*")
+          .eq("user_id", userId)
+          .eq("provider", providerKey)
+          .maybeSingle();
+        if (inserted) patchProviderSetting(providerKey, inserted);
+      }
       await testConnection(providerKey, key);
     } catch {
       toast.error("Failed to save key");
@@ -156,32 +240,70 @@ export default function AISettingsModule({ userId }: AISettingsProps) {
     if (!existing) return;
     await supabase.from("ai_settings").delete().eq("id", existing.id);
     setKeyInputs((prev) => ({ ...prev, [providerKey]: "" }));
+    setSettings((prev) => {
+      const next = { ...prev };
+      delete next[providerKey];
+      return next;
+    });
+    setLiveModels((prev) => {
+      const next = { ...prev };
+      delete next[providerKey];
+      return next;
+    });
+    if (activeProvider === providerKey) {
+      setActiveProvider("");
+      setActiveModel("");
+    }
     toast.success("API key removed");
-    await fetchSettings();
   };
 
   const testConnection = async (providerKey: string, apiKey?: string) => {
     const key = apiKey || keyInputs[providerKey] || settings[providerKey]?.api_key;
-    if (!key) {
+    if (!key?.trim()) {
       toast.error("No API key to test");
       return;
     }
+    const model =
+      settings[providerKey]?.active_model ||
+      getModelsForProvider(providerKey)[0] ||
+      PROVIDERS.find((p) => p.key === providerKey)?.fallbackModels[0] ||
+      "";
+
     setTestingProviders((prev) => ({ ...prev, [providerKey]: true }));
-    await new Promise((r) => setTimeout(r, 1200));
-    // Mock validation - real implementation would call the API
-    const isValid = key.length > 20;
-    const existing = settings[providerKey];
-    if (existing) {
-      await supabase
-        .from("ai_settings")
-        .update({ is_connected: isValid, updated_at: new Date().toISOString() })
-        .eq("id", existing.id);
+    try {
+      const res = await fetch("/api/ai-settings/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: providerKey, apiKey: key.trim(), model }),
+      });
+      const data = (await res.json()) as { ok?: boolean; message?: string; status?: number };
+      const isValid = !!data.ok;
+
+      const existing = settings[providerKey];
+      if (existing) {
+        await supabase
+          .from("ai_settings")
+          .update({ is_connected: isValid, updated_at: new Date().toISOString() })
+          .eq("id", existing.id);
+        patchProviderSetting(providerKey, { ...existing, is_connected: isValid });
+      }
+
+      if (isValid) {
+        toast.success(`${PROVIDERS.find((p) => p.key === providerKey)?.name} connected`);
+        void fetchProviderModels(providerKey, key.trim());
+      } else {
+        const hint = data.status === 401 ? " — check or replace your API key" : "";
+        toast.error(`Connection failed${hint}`, {
+          description: data.message?.slice(0, 120),
+        });
+      }
+    } catch (err) {
+      toast.error("Test request failed", {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setTestingProviders((prev) => ({ ...prev, [providerKey]: false }));
     }
-    toast[isValid ? "success" : "error"](
-      isValid ? `${PROVIDERS.find((p) => p.key === providerKey)?.name} connected!` : "Invalid API key"
-    );
-    setTestingProviders((prev) => ({ ...prev, [providerKey]: false }));
-    await fetchSettings();
   };
 
   const setAsActive = async (providerKey: string, model: string) => {
@@ -202,8 +324,19 @@ export default function AISettingsModule({ userId }: AISettingsProps) {
     setActiveProvider(providerKey);
     setActiveModel(model);
     setModelDropdownOpen(null);
+
+    setSettings((prev) => {
+      const next: Record<string, AIProvider> = {};
+      for (const [k, v] of Object.entries(prev)) {
+        next[k] = { ...v, is_active: k === providerKey };
+      }
+      if (prev[providerKey]) {
+        next[providerKey] = { ...prev[providerKey], is_active: true, active_model: model };
+      }
+      return next;
+    });
+
     toast.success(`Active model set to ${providerKey}/${model}`);
-    await fetchSettings();
   };
 
   const maskKey = (key: string) => {
@@ -211,16 +344,13 @@ export default function AISettingsModule({ userId }: AISettingsProps) {
     return key.slice(0, 6) + "•".repeat(Math.min(key.length - 10, 20)) + key.slice(-4);
   };
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-full">
-        <Loader2 size={24} className="animate-spin text-blue-600" />
-      </div>
-    );
-  }
-
   return (
-    <div className="p-6 flex flex-col gap-6 bg-white h-full">
+    <div className="p-6 flex flex-col gap-6 bg-white h-full relative">
+      {initialLoading && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/80 backdrop-blur-[1px]">
+          <Loader2 size={24} className="animate-spin text-blue-600" />
+        </div>
+      )}
       {/* Active Model Banner */}
       {activeProvider && (
         <div className="rounded-xl p-4 flex items-center justify-between bg-blue-50 border border-blue-200">
@@ -248,6 +378,11 @@ export default function AISettingsModule({ userId }: AISettingsProps) {
           const isTesting = testingProviders[provider.key];
           const isSaving = savingProviders[provider.key];
           const isActive = activeProvider === provider.key;
+          const modelList = getModelsForProvider(provider.key);
+          const isLoadingModels = loadingModels[provider.key];
+          const listSource = modelsSource[provider.key];
+          const savedModel = setting?.active_model;
+          const savedNotInLive = savedModelDeprecated[provider.key];
 
           return (
             <div
@@ -305,6 +440,7 @@ export default function AISettingsModule({ userId }: AISettingsProps) {
                   className="w-full pl-3 pr-9 py-2.5 rounded-lg text-xs outline-none border border-gray-300 bg-white text-gray-900 focus:border-blue-500 focus:ring-2 focus:ring-blue-100 font-mono"
                 />
                 <button
+                  type="button"
                   onClick={() => setShowKeys((prev) => ({ ...prev, [provider.key]: !prev[provider.key] }))}
                   className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
                 >
@@ -314,26 +450,79 @@ export default function AISettingsModule({ userId }: AISettingsProps) {
 
               {/* Model selector (when connected) */}
               {isConnected && (
-                <div className="relative">
+                <div className="relative flex flex-col gap-1">
+                  {savedNotInLive && (
+                    <p className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                      Active model <span className="font-mono">{savedModel}</span> is not in the
+                      live list — choose a current model.
+                    </p>
+                  )}
                   <button
-                    onClick={() => setModelDropdownOpen(modelDropdownOpen === provider.key ? null : provider.key)}
+                    type="button"
+                    onClick={() => openModelDropdown(provider.key)}
                     className="w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs border border-gray-300 bg-white text-gray-700 hover:border-blue-400 transition-all"
                   >
-                    <span className="font-mono">{setting?.active_model || "Select model..."}</span>
-                    <ChevronDown size={12} className="text-gray-400" />
+                    <span className="font-mono truncate">
+                      {setting?.active_model || "Select model..."}
+                    </span>
+                    {isLoadingModels ? (
+                      <Loader2 size={12} className="animate-spin text-blue-600 shrink-0" />
+                    ) : (
+                      <ChevronDown size={12} className="text-gray-400 shrink-0" />
+                    )}
                   </button>
 
+                  {listSource && (
+                    <span className="text-[9px] text-gray-400 px-1">
+                      {listSource === "live"
+                        ? `${modelList.length} models from API`
+                        : "Fallback list (API unavailable)"}
+                    </span>
+                  )}
+
                   {modelDropdownOpen === provider.key && (
-                    <div className="absolute top-full mt-1 left-0 right-0 rounded-lg z-10 bg-white border border-gray-200 shadow-lg overflow-hidden">
-                      {provider.models.map((model) => (
-                        <button
-                          key={model}
-                          onClick={() => setAsActive(provider.key, model)}
-                          className="w-full text-left px-3 py-2 text-[11px] hover:bg-blue-50 transition-colors border-b border-gray-100 text-gray-700 font-mono"
-                        >
-                          {model}
-                        </button>
-                      ))}
+                    <div className="absolute top-full mt-1 left-0 right-0 rounded-lg z-20 bg-white border border-gray-200 shadow-lg overflow-hidden max-h-52 flex flex-col">
+                      <button
+                        type="button"
+                        onClick={() => fetchProviderModels(provider.key)}
+                        disabled={isLoadingModels}
+                        className="flex items-center justify-center gap-1 px-3 py-2 text-[10px] font-medium text-blue-600 bg-blue-50 border-b border-gray-100 hover:bg-blue-100 disabled:opacity-50"
+                      >
+                        {isLoadingModels ? (
+                          <Loader2 size={10} className="animate-spin" />
+                        ) : (
+                          <RefreshCw size={10} />
+                        )}
+                        Refresh from provider
+                      </button>
+                      <div className="overflow-y-auto">
+                        {modelList.length === 0 && !isLoadingModels && (
+                          <p className="px-3 py-2 text-[10px] text-gray-500">
+                            No models — save key and test connection
+                          </p>
+                        )}
+                        {modelList.map((model) => {
+                          const isSavedOnly =
+                            model === savedModel && savedModelDeprecated[provider.key];
+                          return (
+                            <button
+                              key={model}
+                              type="button"
+                              onClick={() => setAsActive(provider.key, model)}
+                              className={`w-full text-left px-3 py-2 text-[11px] hover:bg-blue-50 transition-colors border-b border-gray-100 font-mono ${
+                                setting?.active_model === model
+                                  ? "bg-blue-50 text-blue-700 font-semibold"
+                                  : "text-gray-700"
+                              }`}
+                            >
+                              {model}
+                              {isSavedOnly && (
+                                <span className="ml-1 text-[9px] text-amber-600">(saved)</span>
+                              )}
+                            </button>
+                          );
+                        })}
+                      </div>
                     </div>
                   )}
                 </div>
@@ -342,6 +531,7 @@ export default function AISettingsModule({ userId }: AISettingsProps) {
               {/* Actions */}
               <div className="flex items-center gap-1.5">
                 <button
+                  type="button"
                   onClick={() => saveKey(provider.key)}
                   disabled={isSaving}
                   className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-[11px] font-medium bg-blue-600 text-white hover:bg-blue-700 transition-all disabled:opacity-50"
@@ -350,6 +540,7 @@ export default function AISettingsModule({ userId }: AISettingsProps) {
                   Save
                 </button>
                 <button
+                  type="button"
                   onClick={() => testConnection(provider.key)}
                   disabled={isTesting || !hasKey}
                   className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-[11px] font-medium border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 transition-all disabled:opacity-40"
@@ -359,6 +550,7 @@ export default function AISettingsModule({ userId }: AISettingsProps) {
                 </button>
                 {hasKey && (
                   <button
+                    type="button"
                     onClick={() => deleteKey(provider.key)}
                     className="p-2 rounded-lg border border-red-200 bg-red-50 text-red-600 hover:bg-red-100 transition-all"
                   >
@@ -370,6 +562,7 @@ export default function AISettingsModule({ userId }: AISettingsProps) {
               {/* Set as active */}
               {isConnected && setting?.active_model && (
                 <button
+                  type="button"
                   onClick={() => setAsActive(provider.key, setting.active_model!)}
                   className={`py-2 rounded-lg text-[11px] font-semibold transition-all border ${
                     isActive

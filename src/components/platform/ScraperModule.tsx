@@ -1,20 +1,27 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { ScrapedLead } from "@/types/platform";
 import {
-  Radio, Search, MapPin, Plus, Download,
+  getLeadDisplayLocation,
+  isJunkScrapeLead,
+} from "@/utils/scrape-lead-quality";
+import {
+  Radio, Search, MapPin, Plus, Minus, Download,
   X, CheckSquare, Square, Loader2, ExternalLink,
   Mail, Phone, Globe, Upload, FileText,
-  CheckCircle2, BarChart2, Sparkles, Zap,
+  CheckCircle2, BarChart2, Sparkles, Zap, Settings,
+  Container, AlertTriangle, RefreshCw,
 } from "lucide-react";
 import { createClient } from "../../../supabase/client";
 import { toast } from "sonner";
 
 interface ScraperModuleProps {
   userId: string;
-  onLeadsAdded?: () => void;
+  onLeadsAdded?: (addedCount?: number) => void;
   onGenerateEmails?: (leads: ScrapedLead[]) => void;
+  /** Jump to Settings → AI Settings (district expansion, email gen). */
+  onOpenAiSettings?: () => void;
 }
 
 const NICHES = [
@@ -24,17 +31,153 @@ const NICHES = [
   "Legal", "Consulting", "Agency", "Manufacturing", "Retail",
 ];
 
-export default function ScraperModule({ userId, onLeadsAdded, onGenerateEmails }: ScraperModuleProps) {
-  const [niche, setNiche] = useState("");
-  const [location, setLocation] = useState("");
+type ScrapeSearchRow = {
+  id: string;
+  niche: string;
+  location: string;
+};
+
+function createSearchRow(): ScrapeSearchRow {
+  return { id: crypto.randomUUID(), niche: "", location: "" };
+}
+
+function getValidSearchRows(rows: ScrapeSearchRow[]): ScrapeSearchRow[] {
+  return rows.filter((r) => r.niche.trim() && r.location.trim());
+}
+
+type MapsBackendMode = "puppeteer" | "docker" | "docker_unreachable";
+
+type MapsBackendStatus = {
+  mode: MapsBackendMode;
+  configured: boolean;
+  reachable: boolean;
+  url?: string;
+  maxDepth?: number;
+  label: string;
+  shortLabel: string;
+  hint?: string;
+};
+
+function dedupeScrapedLead(prev: ScrapedLead[], lead: ScrapedLead): ScrapedLead[] {
+  const email = lead.email?.trim().toLowerCase();
+  if (lead.phoneOnly || !email) {
+    const key = `phone|${(lead.phone ?? "").replace(/\D/g, "")}|${lead.company_name}`.toLowerCase();
+    if (prev.some((p) => p.phoneOnly && `phone|${(p.phone ?? "").replace(/\D/g, "")}|${p.company_name}`.toLowerCase() === key)) {
+      return prev;
+    }
+    return [...prev, lead];
+  }
+  if (email) {
+    if (prev.some((p) => p.email?.trim().toLowerCase() === email)) return prev;
+  } else {
+    const key = `${lead.company_name}|${lead.location}`.toLowerCase();
+    if (
+      prev.some(
+        (p) =>
+          `${p.company_name}|${p.location}`.toLowerCase() === key
+      )
+    ) {
+      return prev;
+    }
+  }
+  return [...prev, lead];
+}
+
+type ScrapeStreamHandlers = {
+  onLead?: (lead: ScrapedLead) => void;
+  onStart?: (payload: Record<string, unknown>) => void;
+  onChunkStart?: (payload: Record<string, unknown>) => void;
+  onChunkDone?: (payload: Record<string, unknown>) => void;
+  onProgress?: (payload: Record<string, unknown>) => void;
+  onDone?: (payload: Record<string, unknown>) => void;
+  onError?: (payload: Record<string, unknown>) => void;
+};
+
+async function consumeScrapeStream(
+  res: Response,
+  handlers: ScrapeStreamHandlers
+): Promise<void> {
+  if (!res.ok || !res.body) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(
+      (err as { error?: string }).error || "Scraping failed. Please try again."
+    );
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const parts = buffer.split("\n\n");
+    buffer = parts.pop() ?? "";
+
+    for (const part of parts) {
+      const eventLine = part.match(/^event:\s*(.+)/m);
+      const dataLine = part.match(/^data:\s*(.+)/m);
+      if (!eventLine || !dataLine) continue;
+
+      const event = eventLine[1].trim();
+      let payload: Record<string, unknown>;
+      try {
+        payload = JSON.parse(dataLine[1]);
+      } catch {
+        continue;
+      }
+
+      switch (event) {
+        case "start":
+          handlers.onStart?.(payload);
+          break;
+        case "lead":
+          if (payload.lead) handlers.onLead?.(payload.lead as ScrapedLead);
+          break;
+        case "chunk_start":
+          handlers.onChunkStart?.(payload);
+          break;
+        case "chunk_done":
+          handlers.onChunkDone?.(payload);
+          break;
+        case "progress":
+          handlers.onProgress?.(payload);
+          break;
+        case "done":
+          handlers.onDone?.(payload);
+          break;
+        case "error":
+          handlers.onError?.(payload);
+          break;
+      }
+    }
+  }
+}
+
+export default function ScraperModule({
+  userId,
+  onLeadsAdded,
+  onGenerateEmails,
+  onOpenAiSettings,
+}: ScraperModuleProps) {
+  const [searchRows, setSearchRows] = useState<ScrapeSearchRow[]>([createSearchRow()]);
+  const [suggestionRowId, setSuggestionRowId] = useState<string | null>(null);
+  const [nicheSuggestions, setNicheSuggestions] = useState<string[]>([]);
   const [maxResults, setMaxResults] = useState(100);
+  const [multiQueryProgress, setMultiQueryProgress] = useState<{
+    current: number;
+    total: number;
+    niche: string;
+    location: string;
+  } | null>(null);
   const [isScraping, setIsScraping] = useState(false);
   const [isScrapeAndGenerate, setIsScrapeAndGenerate] = useState(false);
   const [results, setResults] = useState<ScrapedLead[]>([]);
   const [generatedEmails, setGeneratedEmails] = useState<any[]>([]);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [drawerLead, setDrawerLead] = useState<ScrapedLead | null>(null);
-  const [nicheSuggestions, setNicheSuggestions] = useState<string[]>([]);
   const [addingToCRM, setAddingToCRM] = useState(false);
 
   // ── Combined pipeline state ───────────────────────────────────────────────
@@ -52,14 +195,46 @@ export default function ScraperModule({ userId, onLeadsAdded, onGenerateEmails }
     totalChunks: number;
     percentComplete: number;
   } | null>(null);
+  const [scrapeSummary, setScrapeSummary] = useState<{
+    withEmail: number;
+    phoneOnly: number;
+    crmAdded: number;
+    callListAdded: number;
+    researched: number;
+    realEmails: number;
+  } | null>(null);
   const [chunkLog, setChunkLog] = useState<Array<{
+    id: string;
     chunk: number;
+    searchIndex: number;
     leads: number;
-    status: "done" | "running";
+    status: "done" | "running" | "empty";
   }>>([]);
 
   // ── CSV import state ──────────────────────────────────────────────────────
   const [activeTab, setActiveTab] = useState<"scraper" | "csv">("scraper");
+  const [mapsBackend, setMapsBackend] = useState<MapsBackendStatus | null>(null);
+  const [mapsBackendLoading, setMapsBackendLoading] = useState(true);
+  const [liveMapsBackend, setLiveMapsBackend] = useState<MapsBackendStatus | null>(null);
+
+  const loadMapsBackend = useCallback(async () => {
+    setMapsBackendLoading(true);
+    try {
+      const res = await fetch("/api/scraper/maps-backend");
+      if (res.ok) {
+        const data = (await res.json()) as MapsBackendStatus;
+        setMapsBackend(data);
+      }
+    } catch {
+      setMapsBackend(null);
+    } finally {
+      setMapsBackendLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadMapsBackend();
+  }, [loadMapsBackend]);
   const [csvImporting, setCsvImporting] = useState(false);
   const [csvJob, setCsvJob] = useState<{
     jobId: string;
@@ -75,8 +250,18 @@ export default function ScraperModule({ userId, onLeadsAdded, onGenerateEmails }
 
   const supabase = createClient();
 
-  const handleNicheInput = (val: string) => {
-    setNiche(val);
+  const updateSearchRow = (
+    id: string,
+    patch: Partial<Pick<ScrapeSearchRow, "niche" | "location">>
+  ) => {
+    setSearchRows((rows) =>
+      rows.map((r) => (r.id === id ? { ...r, ...patch } : r))
+    );
+  };
+
+  const handleNicheInput = (rowId: string, val: string) => {
+    updateSearchRow(rowId, { niche: val });
+    setSuggestionRowId(rowId);
     setNicheSuggestions(
       val.length > 0
         ? NICHES.filter((n) => n.toLowerCase().includes(val.toLowerCase())).slice(0, 5)
@@ -84,90 +269,212 @@ export default function ScraperModule({ userId, onLeadsAdded, onGenerateEmails }
     );
   };
 
+  const addSearchRow = () => {
+    setSearchRows((rows) => [...rows, createSearchRow()]);
+  };
+
+  const removeSearchRow = (id: string) => {
+    setSearchRows((rows) => {
+      if (rows.length <= 1) return rows;
+      return rows.filter((r) => r.id !== id);
+    });
+    if (suggestionRowId === id) {
+      setSuggestionRowId(null);
+      setNicheSuggestions([]);
+    }
+  };
+
   const handleScrape = async () => {
-    if (!niche.trim()) { toast.error("Enter a niche (e.g. school, restaurant)"); return; }
-    if (!location.trim()) { toast.error("Enter a location (e.g. Kigali Rwanda)"); return; }
+    const queries = getValidSearchRows(searchRows);
+    if (queries.length === 0) {
+      toast.error("Add at least one niche and location pair");
+      return;
+    }
 
     setIsScraping(true);
     setResults([]);
     setSelected(new Set());
     setProgress(null);
     setChunkLog([]);
+    setScrapeSummary(null);
+    setMultiQueryProgress(null);
+    setLiveMapsBackend(null);
+
+    const totalRef = { current: 0 };
+    const lastRunSummary = {
+      callListAdded: 0,
+    };
 
     try {
-      const res = await fetch("/api/scrape-stream", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ niche: niche.trim(), location: location.trim(), maxResults }),
-      });
+      for (let i = 0; i < queries.length; i++) {
+        const q = queries[i];
+        setMultiQueryProgress({
+          current: i + 1,
+          total: queries.length,
+          niche: q.niche.trim(),
+          location: q.location.trim(),
+        });
 
-      if (!res.ok || !res.body) {
-        const err = await res.json().catch(() => ({}));
-        toast.error(err.error || "Scraping failed. Please try again.");
-        setIsScraping(false);
-        return;
-      }
+        if (queries.length > 1) {
+          toast.info(
+            `Search ${i + 1}/${queries.length}: ${q.niche} in ${q.location}`
+          );
+        }
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
+        const res = await fetch("/api/scrape-stream", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            niche: q.niche.trim(),
+            location: q.location.trim(),
+            maxResults,
+          }),
+        });
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+        let activeChunkLogId = "";
 
-        buffer += decoder.decode(value, { stream: true });
-        const parts = buffer.split("\n\n");
-        buffer = parts.pop() ?? "";
-
-        for (const part of parts) {
-          const eventLine = part.match(/^event:\s*(.+)/m);
-          const dataLine  = part.match(/^data:\s*(.+)/m);
-          if (!eventLine || !dataLine) continue;
-
-          const event = eventLine[1].trim();
-          let payload: any;
-          try { payload = JSON.parse(dataLine[1]); } catch { continue; }
-
-          if (event === "lead") {
-            setResults((prev) => [...prev, payload.lead]);
-          } else if (event === "chunk_start") {
+        await consumeScrapeStream(res, {
+          onStart: (payload) => {
+            const mb = payload.mapsBackend as MapsBackendStatus | undefined;
+            if (mb?.mode) setLiveMapsBackend(mb);
+            setProgress({
+              totalFound: totalRef.current,
+              totalFailed: 0,
+              remaining: (payload.maxResults as number) ?? maxResults,
+              currentChunk: 0,
+              totalChunks: (payload.totalChunks as number) ?? 1,
+              percentComplete: 0,
+            });
+          },
+          onLead: (lead) => {
+            setResults((prev) => {
+              const next = dedupeScrapedLead(prev, lead);
+              totalRef.current = next.length;
+              return next;
+            });
+          },
+          onChunkStart: (payload) => {
+            activeChunkLogId = `search-${i}-chunk-${payload.chunk}-${Date.now()}`;
             setChunkLog((prev) => [
               ...prev,
-              { chunk: payload.chunk, leads: 0, status: "running" },
+              {
+                id: activeChunkLogId,
+                chunk: payload.chunk as number,
+                searchIndex: i + 1,
+                leads: 0,
+                status: "running",
+              },
             ]);
-          } else if (event === "chunk_done") {
+            setProgress((p) =>
+              p
+                ? {
+                    ...p,
+                    currentChunk: payload.chunk as number,
+                    totalChunks:
+                      (payload.totalChunks as number) ?? p.totalChunks,
+                  }
+                : p
+            );
+          },
+          onChunkDone: (payload) => {
+            const doneId = activeChunkLogId;
             setChunkLog((prev) =>
               prev.map((c) =>
-                c.chunk === payload.chunk
-                  ? { ...c, leads: payload.chunkLeads, status: "done" }
+                c.id === doneId
+                  ? {
+                      ...c,
+                      leads: payload.chunkLeads as number,
+                      status:
+                        (payload.status as "done" | "running" | "empty") ??
+                        ((payload.chunkLeads as number) > 0 ? "done" : "empty"),
+                    }
                   : c
               )
             );
-          } else if (event === "progress") {
-            setProgress(payload);
-          } else if (event === "done") {
-            if (payload.total === 0) {
-              toast.info("No leads with real emails found. Try a broader niche or different location.");
-            } else {
-              toast.success(`Found ${payload.total} leads with verified emails for "${niche}" in "${location}"`);
+          },
+          onProgress: (payload) => {
+            setProgress({
+              totalFound: totalRef.current,
+              totalFailed: (payload.totalFailed as number) ?? 0,
+              remaining: (payload.remaining as number) ?? 0,
+              currentChunk: (payload.currentChunk as number) ?? 0,
+              totalChunks: (payload.totalChunks as number) ?? 1,
+              percentComplete: (payload.percentComplete as number) ?? 0,
+            });
+          },
+          onDone: (payload) => {
+            const sum = payload.scrapeSummary as {
+              withEmail?: number;
+              phoneOnly?: number;
+              crmAdded?: number;
+              callListAdded?: number;
+              researched?: number;
+              realEmails?: number;
+            } | undefined;
+            const callListAdded =
+              sum?.callListAdded ?? (payload.crmCallListAdded as number) ?? 0;
+            lastRunSummary.callListAdded = callListAdded;
+            if (sum) {
+              setScrapeSummary({
+                withEmail: sum.withEmail ?? (payload.total as number) ?? 0,
+                phoneOnly: sum.phoneOnly ?? (payload.phoneOnlyFound as number) ?? 0,
+                crmAdded: sum.crmAdded ?? (payload.crmAdded as number) ?? 0,
+                callListAdded,
+                researched: sum.researched ?? (payload.crmResearched as number) ?? 0,
+                realEmails: sum.realEmails ?? (payload.realEmails as number) ?? 0,
+              });
             }
-          } else if (event === "error") {
-            toast.error(payload.message || "Scraping failed.");
-          }
-        }
+          },
+          onError: (payload) => {
+            throw new Error(
+              (payload.message as string) || "Scraping failed."
+            );
+          },
+        });
       }
-    } catch {
-      toast.error("Scraping failed. Please try again.");
+
+      setProgress((p) =>
+        p
+          ? {
+              ...p,
+              totalFound: totalRef.current,
+              remaining: 0,
+              percentComplete: 100,
+            }
+          : p
+      );
+
+      if (totalRef.current === 0 && !lastRunSummary.callListAdded) {
+        toast.info(
+          "No leads with real emails found. Try broader niches or different locations."
+        );
+      } else if (queries.length > 1) {
+        toast.success(
+          `Found ${totalRef.current} with email${lastRunSummary.callListAdded ? ` · ${lastRunSummary.callListAdded} call list` : ""} across ${queries.length} searches`
+        );
+      } else {
+        toast.success(
+          `Found ${totalRef.current} with email${lastRunSummary.callListAdded ? ` · ${lastRunSummary.callListAdded} saved to call list (phone only)` : ""}`
+        );
+      }
+    } catch (e) {
+      toast.error(
+        e instanceof Error ? e.message : "Scraping failed. Please try again."
+      );
     } finally {
       setIsScraping(false);
+      setMultiQueryProgress(null);
+      setLiveMapsBackend(null);
     }
   };
 
   // ── Scrape + Generate pipeline ────────────────────────────────────────────
   const handleScrapeAndGenerate = async () => {
-    if (!niche.trim()) { toast.error("Enter a niche (e.g. school, restaurant)"); return; }
-    if (!location.trim()) { toast.error("Enter a location (e.g. Kigali Rwanda)"); return; }
+    const queries = getValidSearchRows(searchRows);
+    if (queries.length === 0) {
+      toast.error("Add at least one niche and location pair");
+      return;
+    }
 
     setIsScrapeAndGenerate(true);
     setResults([]);
@@ -176,77 +483,140 @@ export default function ScraperModule({ userId, onLeadsAdded, onGenerateEmails }
     setProgress(null);
     setChunkLog([]);
     setPipelinePhase("scraping");
-    setPipelineStats({ scraped: 0, emails: 0, fallbacks: 0, total: maxResults });
+    setMultiQueryProgress(null);
+    setLiveMapsBackend(null);
+    setPipelineStats({
+      scraped: 0,
+      emails: 0,
+      fallbacks: 0,
+      total: maxResults * queries.length,
+    });
+
+    const totalRef = { current: 0 };
+    let totalEmails = 0;
+    let totalScrapedReported = 0;
 
     try {
-      const res = await fetch("/api/scrape-and-generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          niche: niche.trim(),
-          location: location.trim(),
-          maxResults,
-          yourCompany: "Pryro",
-          yourService: "ERP platform for business automation",
-          tone: "Direct",
-        }),
-      });
+      for (let i = 0; i < queries.length; i++) {
+        const q = queries[i];
+        setMultiQueryProgress({
+          current: i + 1,
+          total: queries.length,
+          niche: q.niche.trim(),
+          location: q.location.trim(),
+        });
 
-      if (!res.ok || !res.body) {
-        const err = await res.json().catch(() => ({}));
-        toast.error(err.error || "Pipeline failed. Please try again.");
-        return;
-      }
+        const res = await fetch("/api/scrape-and-generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            niche: q.niche.trim(),
+            location: q.location.trim(),
+            maxResults,
+            tone: "Direct",
+          }),
+        });
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
+        if (!res.ok || !res.body) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(
+            (err as { error?: string }).error || "Pipeline failed."
+          );
+        }
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
 
-        buffer += decoder.decode(value, { stream: true });
-        const parts = buffer.split("\n\n");
-        buffer = parts.pop() ?? "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
 
-        for (const part of parts) {
-          const eventLine = part.match(/^event:\s*(.+)/m);
-          const dataLine  = part.match(/^data:\s*(.+)/m);
-          if (!eventLine || !dataLine) continue;
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split("\n\n");
+          buffer = parts.pop() ?? "";
 
-          const event = eventLine[1].trim();
-          let payload: any;
-          try { payload = JSON.parse(dataLine[1]); } catch { continue; }
+          for (const part of parts) {
+            const eventLine = part.match(/^event:\s*(.+)/m);
+            const dataLine = part.match(/^data:\s*(.+)/m);
+            if (!eventLine || !dataLine) continue;
 
-          if (event === "lead") {
-            setResults((prev) => [...prev, payload.lead]);
-            setPipelineStats((s) => ({ ...s, scraped: payload.count }));
-          } else if (event === "scrape_done") {
-            setPipelinePhase("generating");
-            toast.info(`Scraped ${payload.total} leads — generating emails now…`);
-          } else if (event === "email") {
-            setGeneratedEmails((prev) => [...prev, payload.email]);
-            setPipelineStats((s) => ({ ...s, emails: payload.count }));
-          } else if (event === "progress") {
-            if (payload.phase === "generating") {
-              setPipelineStats((s) => ({ ...s, emails: payload.emailCount, fallbacks: payload.failCount }));
+            const event = eventLine[1].trim();
+            let payload: Record<string, unknown>;
+            try {
+              payload = JSON.parse(dataLine[1]);
+            } catch {
+              continue;
             }
-          } else if (event === "done") {
-            setPipelinePhase("done");
-            toast.success(`✅ ${payload.scraped} leads scraped · ${payload.emails} emails generated`);
-            onLeadsAdded?.();
-          } else if (event === "error") {
-            toast.error(payload.message || "Pipeline failed.");
+
+            if (event === "start" && payload.mapsBackend) {
+              const mb = payload.mapsBackend as MapsBackendStatus;
+              if (mb?.mode) setLiveMapsBackend(mb);
+            } else if (event === "lead" && payload.lead) {
+              setResults((prev) => {
+                const next = dedupeScrapedLead(
+                  prev,
+                  payload.lead as ScrapedLead
+                );
+                totalRef.current = next.length;
+                return next;
+              });
+              setPipelineStats((s) => ({
+                ...s,
+                scraped: totalRef.current,
+              }));
+            } else if (event === "scrape_done") {
+              setPipelinePhase("generating");
+              totalScrapedReported = (payload.total as number) ?? totalRef.current;
+              toast.info(
+                `Search ${i + 1}/${queries.length}: scraped ${totalScrapedReported} — generating emails…`
+              );
+            } else if (event === "email") {
+              setGeneratedEmails((prev) => [
+                ...prev,
+                payload.email as Record<string, unknown>,
+              ]);
+              totalEmails = (payload.count as number) ?? totalEmails + 1;
+              setPipelineStats((s) => ({ ...s, emails: totalEmails }));
+            } else if (event === "progress") {
+              if (payload.phase === "generating") {
+                setPipelineStats((s) => ({
+                  ...s,
+                  emails: (payload.emailCount as number) ?? s.emails,
+                  fallbacks: (payload.failCount as number) ?? s.fallbacks,
+                }));
+              }
+            } else if (event === "done") {
+              totalScrapedReported =
+                (payload.scraped as number) ?? totalRef.current;
+              totalEmails = (payload.emails as number) ?? totalEmails;
+            } else if (event === "error") {
+              throw new Error(
+                (payload.message as string) || "Pipeline failed."
+              );
+            }
           }
         }
       }
-    } catch {
-      toast.error("Pipeline failed. Please try again.");
+
+      setPipelinePhase("done");
+      toast.success(
+        `✅ ${totalRef.current} unique leads scraped · ${totalEmails} emails generated across ${queries.length} search(es)`
+      );
+      onLeadsAdded?.(totalRef.current);
+    } catch (e) {
+      toast.error(
+        e instanceof Error ? e.message : "Pipeline failed. Please try again."
+      );
     } finally {
       setIsScrapeAndGenerate(false);
+      setMultiQueryProgress(null);
+      setLiveMapsBackend(null);
     }
   };
+
+  const effectiveMapsBackend = liveMapsBackend ?? mapsBackend;
+  const mapsUsesDocker = effectiveMapsBackend?.mode === "docker";
 
   const toggleRow = (idx: number) => {
     setSelected((prev) => {
@@ -271,7 +641,6 @@ export default function ScraperModule({ userId, onLeadsAdded, onGenerateEmails }
    * - Stores phone, website, source so the CRM has full data
    */
   const addToCRM = async (leadsToAdd: ScrapedLead[]) => {
-    // Allow adding both real AND guessed emails — user can see which is which
     const withEmail = leadsToAdd.filter((l) => l.email && l.email.trim() !== "");
     const withNoEmail = leadsToAdd.filter((l) => !l.email);
 
@@ -282,63 +651,62 @@ export default function ScraperModule({ userId, onLeadsAdded, onGenerateEmails }
 
     setAddingToCRM(true);
     try {
-      const category = niche && location ? `${niche} - ${location}` : niche || location || "Uncategorized";
+      const queries = getValidSearchRows(searchRows);
+      const category =
+        queries.length > 0
+          ? queries
+              .map((q) => `${q.niche.trim()} - ${q.location.trim()}`)
+              .join(" | ")
+          : "Uncategorized";
+      const primaryLocation = queries[0]?.location.trim() ?? "";
 
-      await supabase
-        .from("lead_categories")
-        .upsert({ user_id: userId, name: category }, { onConflict: "user_id,name" })
-        .select();
+      const res = await fetch("/api/leads/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          leads: withEmail.map((l) => ({
+            company_name: l.company_name,
+            email: l.email,
+            phone: l.phone ?? null,
+            website: l.website ?? null,
+            niche: l.niche,
+            location: l.location,
+            business_address: l.business_address,
+            source_snippet: l.source_snippet,
+            company_context: l.company_context,
+            emailIsReal: l.emailIsReal,
+          })),
+          category,
+          searchLocation: primaryLocation,
+        }),
+      });
 
-      // Deduplication
-      const emailsToCheck = withEmail.map((l) => l.email.toLowerCase());
-      const { data: existing } = await supabase
-        .from("leads")
-        .select("email")
-        .eq("user_id", userId)
-        .in("email", emailsToCheck);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to add to CRM");
 
-      const existingEmails = new Set(
-        (existing ?? []).map((r: any) => r.email?.toLowerCase())
-      );
-
-      const newLeads = withEmail.filter(
-        (l) => !existingEmails.has(l.email.toLowerCase())
-      );
-      const duplicateCount = withEmail.length - newLeads.length;
-
-      if (newLeads.length === 0) {
-        toast.info(`All ${withEmail.length} lead${withEmail.length !== 1 ? "s" : ""} already exist in your CRM.`);
+      if (data.added === 0) {
+        toast.info(
+          data.duplicates > 0
+            ? `All ${withEmail.length} lead${withEmail.length !== 1 ? "s" : ""} already exist in your CRM.`
+            : data.message || "No leads were added."
+        );
         return;
       }
 
-      const inserts = newLeads.map((l) => ({
-        user_id: userId,
-        company_name: l.company_name,
-        email: l.email,
-        phone: (l as any).phone ?? null,
-        website: (l as any).website ?? null,
-        niche: l.niche,
-        location: l.location,
-        company_context: l.company_context,
-        status: "new",
-        source: "scraper",
-        confidence_score: (l as any).emailIsReal ? 90 : 50,
-        email_verified: (l as any).emailIsReal ?? false,
-      }));
-
-      const { error } = await supabase.from("leads").insert(inserts);
-      if (error) throw new Error(error.message);
-
-      const realAdded = newLeads.filter((l: any) => l.emailIsReal).length;
-      const guessedAdded = newLeads.length - realAdded;
-      let msg = `✅ ${newLeads.length} lead${newLeads.length !== 1 ? "s" : ""} added to CRM`;
-      if (realAdded > 0 && guessedAdded > 0) msg += ` (${realAdded} verified, ${guessedAdded} guessed)`;
-      if (duplicateCount > 0) msg += ` · ${duplicateCount} duplicate${duplicateCount !== 1 ? "s" : ""} skipped`;
+      const realAdded = withEmail.filter((l) => l.emailIsReal).length;
+      let msg = `✅ ${data.added} lead${data.added !== 1 ? "s" : ""} added to CRM`;
+      if (data.duplicates > 0) {
+        msg += ` · ${data.duplicates} duplicate${data.duplicates !== 1 ? "s" : ""} skipped`;
+      }
+      if (data.junkFiltered > 0) {
+        msg += ` · ${data.junkFiltered} filtered (wrong area or junk)`;
+      }
       if (withNoEmail.length > 0) msg += ` · ${withNoEmail.length} skipped (no email)`;
       toast.success(msg);
-      onLeadsAdded?.();
-    } catch (e: any) {
-      toast.error(e?.message || "Failed to add to CRM");
+      onLeadsAdded?.(data.added);
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : "Failed to add to CRM";
+      toast.error(message);
     } finally {
       setAddingToCRM(false);
     }
@@ -357,7 +725,7 @@ export default function ScraperModule({ userId, onLeadsAdded, onGenerateEmails }
           `"${(l as any).website ?? ""}"`,
           `"${l.niche}"`,
           `"${l.location}"`,
-          `"${l.company_context.replace(/"/g, "'")}"`,
+          `"${(l.company_context ?? "").replace(/"/g, "'")}"`,
         ].join(",")
       ),
     ].join("\n");
@@ -365,7 +733,15 @@ export default function ScraperModule({ userId, onLeadsAdded, onGenerateEmails }
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `leads-${niche}-${location}.csv`.replace(/\s+/g, "-").toLowerCase();
+    const queries = getValidSearchRows(searchRows);
+    const slug =
+      queries.length > 0
+        ? queries
+            .map((q) => `${q.niche}-${q.location}`)
+            .join("_")
+            .slice(0, 80)
+        : "export";
+    a.download = `leads-${slug}.csv`.replace(/\s+/g, "-").toLowerCase();
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -429,7 +805,7 @@ export default function ScraperModule({ userId, onLeadsAdded, onGenerateEmails }
             setCsvImporting(false);
             if (job.status === "completed") {
               toast.success(`Import complete: ${job.total_saved ?? 0} leads added`);
-              onLeadsAdded?.();
+              onLeadsAdded?.(job.total_saved ?? 0);
             } else {
               toast.error("Import failed. Check error log.");
             }
@@ -565,49 +941,138 @@ export default function ScraperModule({ userId, onLeadsAdded, onGenerateEmails }
 
       {/* ── Search Panel ─────────────────────────────────────────────── */}
       <div className="rounded-xl p-5 bg-white border border-gray-200 shadow-sm">
-        <div className="flex items-center gap-2 mb-4">
+        <div className="flex items-center gap-2 mb-3 flex-wrap">
           <Radio size={15} className="text-blue-600" />
           <span className="text-sm font-semibold text-gray-900">Lead Scraper</span>
-          <span className="ml-auto text-[10px] text-gray-400">Powered by Puppeteer + Google Maps</span>
-        </div>
-
-        <div className="flex flex-col sm:flex-row gap-3">
-          {/* Niche */}
-          <div className="relative flex-1">
-            <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-            <input
-              type="text"
-              placeholder="Niche (e.g. school, restaurant)"
-              value={niche}
-              onChange={(e) => handleNicheInput(e.target.value)}
-              className="w-full pl-9 pr-3 py-2.5 rounded-lg text-sm border border-gray-300 text-gray-900 focus:border-blue-500 focus:ring-2 focus:ring-blue-100 outline-none"
-            />
-            {nicheSuggestions.length > 0 && (
-              <div className="absolute top-full mt-1 left-0 right-0 bg-white rounded-lg z-10 shadow-lg border border-gray-200 overflow-hidden">
-                {nicheSuggestions.map((s) => (
-                  <button
-                    key={s}
-                    className="w-full text-left px-3 py-2 text-xs hover:bg-blue-50 text-gray-700"
-                    onClick={() => { setNiche(s); setNicheSuggestions([]); }}
-                  >
-                    {s}
-                  </button>
-                ))}
-              </div>
+          <div className="ml-auto flex items-center gap-2 flex-wrap justify-end">
+            {mapsBackendLoading ? (
+              <span className="text-[10px] text-gray-400 flex items-center gap-1">
+                <Loader2 size={10} className="animate-spin" />
+                Checking Maps backend…
+              </span>
+            ) : effectiveMapsBackend ? (
+              <span
+                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border ${
+                  effectiveMapsBackend.mode === "docker"
+                    ? "bg-teal-50 border-teal-200 text-teal-800"
+                    : effectiveMapsBackend.mode === "docker_unreachable"
+                      ? "bg-amber-50 border-amber-200 text-amber-800"
+                      : "bg-gray-50 border-gray-200 text-gray-600"
+                }`}
+                title={effectiveMapsBackend.hint}
+              >
+                {effectiveMapsBackend.mode === "docker" ? (
+                  <Container size={10} />
+                ) : effectiveMapsBackend.mode === "docker_unreachable" ? (
+                  <AlertTriangle size={10} />
+                ) : (
+                  <MapPin size={10} />
+                )}
+                {effectiveMapsBackend.shortLabel}
+              </span>
+            ) : (
+              <span className="text-[10px] text-gray-400">Puppeteer Maps</span>
+            )}
+            <button
+              type="button"
+              onClick={loadMapsBackend}
+              disabled={mapsBackendLoading}
+              className="p-1 text-gray-400 hover:text-gray-600 rounded"
+              title="Refresh Maps backend status"
+            >
+              <RefreshCw size={11} className={mapsBackendLoading ? "animate-spin" : ""} />
+            </button>
+            {onOpenAiSettings && (
+              <button
+                type="button"
+                onClick={onOpenAiSettings}
+                className="flex items-center gap-1 text-[10px] font-medium text-blue-600 hover:text-blue-800"
+              >
+                <Settings size={11} />
+                AI Settings
+              </button>
             )}
           </div>
+        </div>
 
-          {/* Location */}
-          <div className="relative flex-1">
-            <MapPin size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-            <input
-              type="text"
-              placeholder="Location (e.g. Kigali Rwanda)"
-              value={location}
-              onChange={(e) => setLocation(e.target.value)}
-              className="w-full pl-9 pr-3 py-2.5 rounded-lg text-sm border border-gray-300 text-gray-900 focus:border-blue-500 focus:ring-2 focus:ring-blue-100 outline-none"
-            />
-          </div>
+        <div className="flex flex-col gap-3">
+          {searchRows.map((row, index) => (
+            <div key={row.id} className="flex flex-col sm:flex-row gap-2 items-stretch">
+              <div className="relative flex-1 min-w-0">
+                <Search
+                  size={13}
+                  className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"
+                />
+                <input
+                  type="text"
+                  placeholder="Niche (e.g. school, restaurant)"
+                  value={row.niche}
+                  onChange={(e) => handleNicheInput(row.id, e.target.value)}
+                  onFocus={() => setSuggestionRowId(row.id)}
+                  className="w-full pl-9 pr-3 py-2.5 rounded-lg text-sm border border-gray-300 text-gray-900 focus:border-blue-500 focus:ring-2 focus:ring-blue-100 outline-none"
+                />
+                {suggestionRowId === row.id && nicheSuggestions.length > 0 && (
+                  <div className="absolute top-full mt-1 left-0 right-0 bg-white rounded-lg z-20 shadow-lg border border-gray-200 overflow-hidden">
+                    {nicheSuggestions.map((s) => (
+                      <button
+                        key={s}
+                        type="button"
+                        className="w-full text-left px-3 py-2 text-xs hover:bg-blue-50 text-gray-700"
+                        onClick={() => {
+                          updateSearchRow(row.id, { niche: s });
+                          setNicheSuggestions([]);
+                        }}
+                      >
+                        {s}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="relative flex-1 min-w-0">
+                <MapPin
+                  size={13}
+                  className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"
+                />
+                <input
+                  type="text"
+                  placeholder="Location (e.g. Kigali Rwanda)"
+                  value={row.location}
+                  onChange={(e) =>
+                    updateSearchRow(row.id, { location: e.target.value })
+                  }
+                  className="w-full pl-9 pr-3 py-2.5 rounded-lg text-sm border border-gray-300 text-gray-900 focus:border-blue-500 focus:ring-2 focus:ring-blue-100 outline-none"
+                />
+              </div>
+
+              {searchRows.length > 1 ? (
+                <button
+                  type="button"
+                  onClick={() => removeSearchRow(row.id)}
+                  disabled={isScraping || isScrapeAndGenerate}
+                  className="flex items-center justify-center px-3 py-2.5 rounded-lg border border-gray-300 text-gray-500 hover:bg-gray-50 hover:text-red-600 disabled:opacity-40 shrink-0"
+                  title="Remove this search"
+                  aria-label={`Remove search row ${index + 1}`}
+                >
+                  <Minus size={16} />
+                </button>
+              ) : (
+                <div className="w-[46px] shrink-0 hidden sm:block" aria-hidden />
+              )}
+            </div>
+          ))}
+
+          <div className="flex flex-col sm:flex-row gap-3 items-stretch flex-wrap">
+          <button
+            type="button"
+            onClick={addSearchRow}
+            disabled={isScraping || isScrapeAndGenerate}
+            className="flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-lg text-sm font-medium border border-dashed border-gray-300 text-gray-600 hover:border-blue-400 hover:text-blue-600 hover:bg-blue-50/50 disabled:opacity-40 shrink-0"
+          >
+            <Plus size={16} />
+            Add search
+          </button>
 
           {/* Max results */}
           <select
@@ -647,23 +1112,29 @@ export default function ScraperModule({ userId, onLeadsAdded, onGenerateEmails }
               : <><Zap size={14} />Scrape + AI Emails</>
             }
           </button>
+          </div>
         </div>
 
         {(isScraping || isScrapeAndGenerate) && (
-          <p className="text-xs text-blue-600 mt-3 flex items-center gap-2">
-            <Loader2 size={11} className="animate-spin" />
+          <p className="text-xs text-blue-600 mt-3 flex items-center gap-2 flex-wrap">
+            <Loader2 size={11} className="animate-spin shrink-0" />
+            {multiQueryProgress && multiQueryProgress.total > 1 && (
+              <span className="font-medium">
+                Search {multiQueryProgress.current}/{multiQueryProgress.total}:{" "}
+                {multiQueryProgress.niche} · {multiQueryProgress.location}
+                {" — "}
+              </span>
+            )}
             {isScrapeAndGenerate && pipelinePhase === "generating"
               ? `Generating emails… ${pipelineStats.emails}/${pipelineStats.scraped} done`
-              : results.length > 0
-                ? `Found ${results.length} leads so far — still scraping…`
-                : "Visiting websites and extracting real emails — leads appear as they're found…"
+              : mapsUsesDocker && results.length === 0
+                ? "Docker Maps jobs running — first results may take a few minutes per district…"
+                : results.length > 0
+                  ? `Found ${results.length} unique leads so far — still scraping…`
+                  : mapsUsesDocker
+                    ? "Docker Maps + website email extraction — leads appear as they're found…"
+                    : "Visiting websites and extracting real emails — leads appear as they're found…"
             }
-          </p>
-        )}
-        {!isScraping && !isScrapeAndGenerate && results.length === 0 && (
-          <p className="text-xs text-gray-400 mt-3">
-            💡 e.g. <strong>school</strong> + <strong>Kigali Rwanda</strong> — scraper visits each website to find real contact emails.
-            Use <strong>Scrape + AI Emails</strong> to also generate personalised outreach in one click.
           </p>
         )}
       </div>
@@ -691,11 +1162,22 @@ export default function ScraperModule({ userId, onLeadsAdded, onGenerateEmails }
             />
           </div>
 
+          {scrapeSummary && !isScraping && (
+            <p className="text-xs text-gray-600 mb-3 bg-blue-50 border border-blue-100 rounded-lg px-3 py-2">
+              <strong>Run summary:</strong> {scrapeSummary.withEmail} with email (
+              {scrapeSummary.realEmails} from website crawl) · {scrapeSummary.crmAdded}{" "}
+              saved to CRM · {scrapeSummary.researched} researched
+              {scrapeSummary.callListAdded > 0
+                ? ` · ${scrapeSummary.callListAdded} call list (phone only — use Pipeline → Retry enrich)`
+                : ""}
+            </p>
+          )}
+
           {/* Stats row */}
           <div className="grid grid-cols-4 gap-2 mb-3">
             {[
               { label: "Scraped", value: progress?.totalFound ?? results.length, color: "text-blue-600" },
-              { label: "Chunk", value: progress ? `${progress.currentChunk}/${progress.totalChunks}` : "—" },
+              { label: "Round", value: progress ? `${progress.currentChunk}/${progress.totalChunks}` : "—" },
               { label: "Failed", value: progress?.totalFailed ?? 0, color: "text-red-500" },
               { label: "Remaining", value: progress?.remaining ?? "…", color: "text-orange-500" },
             ].map((s) => (
@@ -711,20 +1193,31 @@ export default function ScraperModule({ userId, onLeadsAdded, onGenerateEmails }
             <div className="flex flex-wrap gap-1.5">
               {chunkLog.map((c) => (
                 <div
-                  key={c.chunk}
+                  key={c.id}
                   className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] font-medium border ${
                     c.status === "done"
                       ? "bg-green-50 border-green-200 text-green-700"
-                      : "bg-blue-50 border-blue-200 text-blue-700"
+                      : c.status === "empty"
+                        ? "bg-amber-50 border-amber-200 text-amber-700"
+                        : "bg-blue-50 border-blue-200 text-blue-700"
                   }`}
                 >
                   {c.status === "done" ? (
                     <CheckCircle2 size={10} />
+                  ) : c.status === "empty" ? (
+                    <span className="text-[9px]">—</span>
                   ) : (
                     <Loader2 size={10} className="animate-spin" />
                   )}
-                  Chunk {c.chunk}
-                  {c.status === "done" && <span className="text-gray-400">· {c.leads}</span>}
+                  {getValidSearchRows(searchRows).length > 1
+                    ? `S${c.searchIndex} R${c.chunk}`
+                    : `Round ${c.chunk}`}
+                  {c.status !== "running" && (
+                    <span className="text-gray-400">
+                      · {c.leads}
+                      {c.status === "empty" ? " (no new)" : ""}
+                    </span>
+                  )}
                 </div>
               ))}
             </div>
@@ -968,9 +1461,20 @@ export default function ScraperModule({ userId, onLeadsAdded, onGenerateEmails }
                         </span>
                       </td>
                       <td className="px-4 py-3">
-                        <span className="text-xs text-gray-500 flex items-center gap-1">
-                          <MapPin size={10} className="text-gray-400" />
-                          {lead.location}
+                        <span
+                          className={`text-xs flex items-center gap-1 ${
+                            getLeadDisplayLocation(lead, lead.location) === "Not in search area"
+                              ? "text-amber-600"
+                              : "text-gray-500"
+                          }`}
+                          title={
+                            getLeadDisplayLocation(lead, lead.location) === "Not in search area"
+                              ? `Search was: ${lead.location}`
+                              : undefined
+                          }
+                        >
+                          <MapPin size={10} className="text-gray-400 shrink-0" />
+                          {getLeadDisplayLocation(lead, lead.location)}
                         </span>
                       </td>
                       <td className="px-4 py-3">
@@ -1017,7 +1521,7 @@ export default function ScraperModule({ userId, onLeadsAdded, onGenerateEmails }
             <div className="w-16 h-16 rounded-full mx-auto mb-4 flex items-center justify-center bg-blue-50 border border-blue-100">
               <Radio size={24} className="text-blue-600" />
             </div>
-            <p className="text-sm font-medium text-gray-700">Enter a niche and location to find leads</p>
+            <p className="text-sm font-medium text-gray-700">Add niche + location rows, then scrape</p>
             <p className="text-xs mt-1 text-gray-500">
               e.g. <strong>school</strong> + <strong>Kigali Rwanda</strong>
             </p>
@@ -1075,7 +1579,15 @@ export default function ScraperModule({ userId, onLeadsAdded, onGenerateEmails }
                 )}
                 <div className="flex items-center gap-2">
                   <MapPin size={13} className="text-gray-400 flex-shrink-0" />
-                  <span className="text-sm text-gray-600">{drawerLead.location}</span>
+                  <span className="text-sm text-gray-600">
+                    {getLeadDisplayLocation(drawerLead, drawerLead.location)}
+                  </span>
+                  {getLeadDisplayLocation(drawerLead, drawerLead.location) ===
+                    "Not in search area" && (
+                    <span className="text-xs text-amber-600 block mt-0.5">
+                      Search target: {drawerLead.location}
+                    </span>
+                  )}
                 </div>
               </div>
 

@@ -3,6 +3,12 @@
  * Scrapes real email addresses from company websites without using paid APIs
  */
 
+import {
+  buildWebsiteFetchUrls,
+  extractEmailsFromHtml,
+  pickFromAggregatedPages,
+} from './business-email-picker';
+
 export interface EmailScrapingResult {
   emails: string[];
   bestEmail: string | null;
@@ -87,7 +93,7 @@ function findBestEmail(emails: string[]): string | null {
 /**
  * Fetch a webpage with proper headers
  */
-async function fetchWebpage(url: string, timeout: number = 10000): Promise<string | null> {
+export async function fetchWebpage(url: string, timeout: number = 10000): Promise<string | null> {
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeout);
@@ -122,26 +128,9 @@ async function fetchWebpage(url: string, timeout: number = 10000): Promise<strin
  */
 function generateURLsToCheck(companyName: string, website?: string): string[] {
   const urls: string[] = [];
-  
+
   if (website) {
-    // Normalize website URL
-    const normalizedWebsite = website.startsWith('http') ? website : `https://${website}`;
-    
-    try {
-      const baseUrl = new URL(normalizedWebsite);
-      const origin = baseUrl.origin;
-      
-      // Add main pages to check
-      urls.push(origin); // Homepage
-      urls.push(`${origin}/contact`);
-      urls.push(`${origin}/contact-us`);
-      urls.push(`${origin}/about`);
-      urls.push(`${origin}/about-us`);
-      urls.push(`${origin}/get-in-touch`);
-      urls.push(`${origin}/reach-us`);
-    } catch (e) {
-      console.error('Invalid website URL:', website);
-    }
+    return buildWebsiteFetchUrls(website);
   } else {
     // Generate domain from company name
     const slug = companyName
@@ -180,33 +169,45 @@ export async function scrapeEmailFromWebsite(
   let successUrl = '';
   
   console.log(`[Email Scraper] Checking ${urlsToCheck.length} URLs for ${companyName}`);
-  
-  // Check each URL
-  for (const url of urlsToCheck) {
-    console.log(`[Email Scraper] Fetching: ${url}`);
-    
-    const html = await fetchWebpage(url);
-    if (!html) continue;
-    
-    const emails = extractEmailsFromHTML(html);
-    
-    if (emails.length > 0) {
-      console.log(`[Email Scraper] Found ${emails.length} emails on ${url}`);
-      emails.forEach(email => allEmails.add(email));
-      
-      if (!successUrl) {
-        successUrl = url;
-      }
-      
-      // If we found emails on contact page, we can stop
-      if (url.includes('/contact') && emails.length > 0) {
-        break;
-      }
+
+  let siteHost = '';
+  if (website) {
+    try {
+      siteHost = new URL(
+        website.startsWith('http') ? website : `https://${website}`
+      ).hostname.replace(/^www\./, '');
+    } catch {
+      siteHost = '';
     }
   }
-  
-  const emailArray = Array.from(allEmails);
-  const bestEmail = findBestEmail(emailArray);
+
+  const pages: Array<{
+    url: string;
+    extracted: ReturnType<typeof extractEmailsFromHtml>;
+  }> = [];
+
+  for (const url of urlsToCheck) {
+    console.log(`[Email Scraper] Fetching: ${url}`);
+    const html = await fetchWebpage(url);
+    if (!html) continue;
+    const extracted = extractEmailsFromHtml(html);
+    if (extracted.all.length > 0) {
+      console.log(`[Email Scraper] Found ${extracted.all.length} emails on ${url}`);
+      pages.push({ url, extracted });
+      extracted.all.forEach((email) => allEmails.add(email));
+      if (!successUrl) successUrl = url;
+    }
+  }
+
+  const pick =
+    siteHost && pages.length > 0
+      ? pickFromAggregatedPages(pages, siteHost)
+      : null;
+  const emailArray = pick?.allEmails.length
+    ? pick.allEmails
+    : Array.from(allEmails);
+  const bestEmail =
+    pick?.bestEmail ?? findBestEmail(emailArray);
   
   console.log(`[Email Scraper] Results for ${companyName}:`, {
     totalFound: emailArray.length,

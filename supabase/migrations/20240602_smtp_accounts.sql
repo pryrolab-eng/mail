@@ -61,8 +61,9 @@ CREATE TABLE IF NOT EXISTS email_queue (
 -- Add foreign key constraint to leads table if it exists
 DO $$
 BEGIN
-  IF EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'leads') THEN
-    ALTER TABLE email_queue ADD CONSTRAINT fk_email_queue_lead_id 
+  IF EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'leads')
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_email_queue_lead_id') THEN
+    ALTER TABLE email_queue ADD CONSTRAINT fk_email_queue_lead_id
       FOREIGN KEY (lead_id) REFERENCES public.leads(id) ON DELETE CASCADE;
   END IF;
 END $$;
@@ -83,15 +84,15 @@ CREATE TABLE IF NOT EXISTS email_templates (
 );
 
 -- Create indexes for better performance
-CREATE INDEX idx_smtp_accounts_user_id ON smtp_accounts(user_id);
-CREATE INDEX idx_smtp_accounts_status ON smtp_accounts(status);
-CREATE INDEX idx_email_campaigns_user_id ON email_campaigns(user_id);
-CREATE INDEX idx_email_campaigns_status ON email_campaigns(status);
-CREATE INDEX idx_email_queue_user_id ON email_queue(user_id);
-CREATE INDEX idx_email_queue_status ON email_queue(status);
-CREATE INDEX idx_email_queue_campaign_id ON email_queue(campaign_id);
-CREATE INDEX idx_email_queue_scheduled_at ON email_queue(scheduled_at);
-CREATE INDEX idx_email_templates_user_id ON email_templates(user_id);
+CREATE INDEX IF NOT EXISTS idx_smtp_accounts_user_id ON smtp_accounts(user_id);
+CREATE INDEX IF NOT EXISTS idx_smtp_accounts_status ON smtp_accounts(status);
+CREATE INDEX IF NOT EXISTS idx_email_campaigns_user_id ON email_campaigns(user_id);
+CREATE INDEX IF NOT EXISTS idx_email_campaigns_status ON email_campaigns(status);
+CREATE INDEX IF NOT EXISTS idx_email_queue_user_id ON email_queue(user_id);
+CREATE INDEX IF NOT EXISTS idx_email_queue_status ON email_queue(status);
+CREATE INDEX IF NOT EXISTS idx_email_queue_campaign_id ON email_queue(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_email_queue_scheduled_at ON email_queue(scheduled_at);
+CREATE INDEX IF NOT EXISTS idx_email_templates_user_id ON email_templates(user_id);
 
 -- Create function to update updated_at timestamp
 CREATE OR REPLACE FUNCTION update_updated_at_column()
@@ -102,16 +103,20 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Create triggers for updated_at
+-- Create triggers for updated_at (idempotent)
+DROP TRIGGER IF EXISTS update_smtp_accounts_updated_at ON smtp_accounts;
 CREATE TRIGGER update_smtp_accounts_updated_at BEFORE UPDATE ON smtp_accounts
   FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
+DROP TRIGGER IF EXISTS update_email_campaigns_updated_at ON email_campaigns;
 CREATE TRIGGER update_email_campaigns_updated_at BEFORE UPDATE ON email_campaigns
   FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
+DROP TRIGGER IF EXISTS update_email_queue_updated_at ON email_queue;
 CREATE TRIGGER update_email_queue_updated_at BEFORE UPDATE ON email_queue
   FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
+DROP TRIGGER IF EXISTS update_email_templates_updated_at ON email_templates;
 CREATE TRIGGER update_email_templates_updated_at BEFORE UPDATE ON email_templates
   FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
@@ -121,70 +126,58 @@ ALTER TABLE email_campaigns ENABLE ROW LEVEL SECURITY;
 ALTER TABLE email_queue ENABLE ROW LEVEL SECURITY;
 ALTER TABLE email_templates ENABLE ROW LEVEL SECURITY;
 
--- SMTP accounts policies
+-- SMTP accounts policies (idempotent)
+DROP POLICY IF EXISTS "Users can view their own SMTP accounts" ON smtp_accounts;
 CREATE POLICY "Users can view their own SMTP accounts"
-  ON smtp_accounts FOR SELECT
-  USING (auth.uid() = user_id);
-
+  ON smtp_accounts FOR SELECT USING (auth.uid() = user_id);
+DROP POLICY IF EXISTS "Users can insert their own SMTP accounts" ON smtp_accounts;
 CREATE POLICY "Users can insert their own SMTP accounts"
-  ON smtp_accounts FOR INSERT
-  WITH CHECK (auth.uid() = user_id);
-
+  ON smtp_accounts FOR INSERT WITH CHECK (auth.uid() = user_id);
+DROP POLICY IF EXISTS "Users can update their own SMTP accounts" ON smtp_accounts;
 CREATE POLICY "Users can update their own SMTP accounts"
-  ON smtp_accounts FOR UPDATE
-  USING (auth.uid() = user_id);
-
+  ON smtp_accounts FOR UPDATE USING (auth.uid() = user_id);
+DROP POLICY IF EXISTS "Users can delete their own SMTP accounts" ON smtp_accounts;
 CREATE POLICY "Users can delete their own SMTP accounts"
-  ON smtp_accounts FOR DELETE
-  USING (auth.uid() = user_id);
+  ON smtp_accounts FOR DELETE USING (auth.uid() = user_id);
 
--- Email campaigns policies
+-- Email campaigns policies (idempotent)
+DROP POLICY IF EXISTS "Users can view their own campaigns" ON email_campaigns;
 CREATE POLICY "Users can view their own campaigns"
-  ON email_campaigns FOR SELECT
-  USING (auth.uid() = user_id);
-
+  ON email_campaigns FOR SELECT USING (auth.uid() = user_id);
+DROP POLICY IF EXISTS "Users can insert their own campaigns" ON email_campaigns;
 CREATE POLICY "Users can insert their own campaigns"
-  ON email_campaigns FOR INSERT
-  WITH CHECK (auth.uid() = user_id);
-
+  ON email_campaigns FOR INSERT WITH CHECK (auth.uid() = user_id);
+DROP POLICY IF EXISTS "Users can update their own campaigns" ON email_campaigns;
 CREATE POLICY "Users can update their own campaigns"
-  ON email_campaigns FOR UPDATE
-  USING (auth.uid() = user_id);
-
+  ON email_campaigns FOR UPDATE USING (auth.uid() = user_id);
+DROP POLICY IF EXISTS "Users can delete their own campaigns" ON email_campaigns;
 CREATE POLICY "Users can delete their own campaigns"
-  ON email_campaigns FOR DELETE
-  USING (auth.uid() = user_id);
+  ON email_campaigns FOR DELETE USING (auth.uid() = user_id);
 
--- Email queue policies
+-- Email queue policies (idempotent)
+DROP POLICY IF EXISTS "Users can view their own email queue" ON email_queue;
 CREATE POLICY "Users can view their own email queue"
-  ON email_queue FOR SELECT
-  USING (auth.uid() = user_id);
-
+  ON email_queue FOR SELECT USING (auth.uid() = user_id);
+DROP POLICY IF EXISTS "Users can insert their own email queue" ON email_queue;
 CREATE POLICY "Users can insert their own email queue"
-  ON email_queue FOR INSERT
-  WITH CHECK (auth.uid() = user_id);
-
+  ON email_queue FOR INSERT WITH CHECK (auth.uid() = user_id);
+DROP POLICY IF EXISTS "Users can update their own email queue" ON email_queue;
 CREATE POLICY "Users can update their own email queue"
-  ON email_queue FOR UPDATE
-  USING (auth.uid() = user_id);
-
+  ON email_queue FOR UPDATE USING (auth.uid() = user_id);
+DROP POLICY IF EXISTS "Users can delete their own email queue" ON email_queue;
 CREATE POLICY "Users can delete their own email queue"
-  ON email_queue FOR DELETE
-  USING (auth.uid() = user_id);
+  ON email_queue FOR DELETE USING (auth.uid() = user_id);
 
--- Email templates policies
+-- Email templates policies (idempotent)
+DROP POLICY IF EXISTS "Users can view their own templates" ON email_templates;
 CREATE POLICY "Users can view their own templates"
-  ON email_templates FOR SELECT
-  USING (auth.uid() = user_id);
-
+  ON email_templates FOR SELECT USING (auth.uid() = user_id);
+DROP POLICY IF EXISTS "Users can insert their own templates" ON email_templates;
 CREATE POLICY "Users can insert their own templates"
-  ON email_templates FOR INSERT
-  WITH CHECK (auth.uid() = user_id);
-
+  ON email_templates FOR INSERT WITH CHECK (auth.uid() = user_id);
+DROP POLICY IF EXISTS "Users can update their own templates" ON email_templates;
 CREATE POLICY "Users can update their own templates"
-  ON email_templates FOR UPDATE
-  USING (auth.uid() = user_id);
-
+  ON email_templates FOR UPDATE USING (auth.uid() = user_id);
+DROP POLICY IF EXISTS "Users can delete their own templates" ON email_templates;
 CREATE POLICY "Users can delete their own templates"
-  ON email_templates FOR DELETE
-  USING (auth.uid() = user_id);
+  ON email_templates FOR DELETE USING (auth.uid() = user_id);

@@ -63,20 +63,27 @@ export async function GET(request: NextRequest) {
 
         // Update campaign opened_count
         if (sentEmail.campaign_id) {
-          await service.rpc('increment_campaign_stat', {
-            p_campaign_id: sentEmail.campaign_id,
-            p_column: 'opened_count',
-          }).catch(() => {});
+          try {
+            await service.rpc('increment_campaign_stat', {
+              p_campaign_id: sentEmail.campaign_id,
+              p_column: 'opened_count',
+            });
+          } catch {
+            /* optional */
+          }
         }
 
-        // Create notification
-        await service.from('notifications').insert({
-          user_id: sentEmail.user_id,
-          type: 'info',
-          title: 'Email Opened',
-          message: 'A recipient opened your email',
-          data: { sent_email_id: sentEmail.id, lead_id: sentEmail.lead_id },
-        }).catch(() => {});
+        try {
+          await service.from('notifications').insert({
+            user_id: sentEmail.user_id,
+            type: 'info',
+            title: 'Email Opened',
+            message: 'A recipient opened your email',
+            data: { sent_email_id: sentEmail.id, lead_id: sentEmail.lead_id },
+          });
+        } catch {
+          /* optional */
+        }
       }
     } catch (err) {
       // Non-fatal — always return the pixel

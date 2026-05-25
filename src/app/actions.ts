@@ -7,6 +7,12 @@ import { createClient } from "../../supabase/server";
 import { scrapeWithoutAPI } from "@/utils/puppeteer-scraper";
 import { SMTPManager } from "@/utils/smtp-server";
 import { generatePersonalizedEmail } from "@/utils/smtp-manager";
+import { runLeadResearch } from "@/utils/lead-research";
+import type { LeadResearchResult } from "@/utils/lead-research";
+import { runGenerateEmailForLead } from "@/utils/lead-email-generation";
+import type { GenerateEmailResult } from "@/utils/lead-email-generation";
+import { runSendEmailForLead } from "@/utils/lead-pipeline-send";
+import type { SendLeadEmailResult } from "@/utils/lead-pipeline-send";
 
 export const signUpAction = async (formData: FormData) => {
   const email = formData.get("email")?.toString();
@@ -164,6 +170,115 @@ export const signOutAction = async () => {
   const supabase = await createClient();
   await supabase.auth.signOut();
   return redirect("/sign-in");
+};
+
+/** Pipeline Step 3: scrape company website → company_context, stage = researched */
+export const researchLead = async (
+  leadId: string
+): Promise<LeadResearchResult> => {
+  const supabase = await createClient();
+  const {
+    data: { user },
+    error: authError,
+  } = await supabase.auth.getUser();
+
+  if (authError || !user) {
+    return {
+      success: false,
+      leadId,
+      pipeline_stage: "failed",
+      error: "Unauthorized",
+    };
+  }
+
+  if (!leadId?.trim()) {
+    return {
+      success: false,
+      leadId: leadId ?? "",
+      pipeline_stage: "failed",
+      error: "Lead ID is required",
+    };
+  }
+
+  return runLeadResearch(supabase, user.id, leadId.trim());
+};
+
+/** Pipeline Step 4: AI email from company_context → generated_emails, stage = email_drafted */
+export const generateEmailForLead = async (
+  leadId: string,
+  options?: { preview?: boolean }
+): Promise<GenerateEmailResult> => {
+  const supabase = await createClient();
+  const {
+    data: { user },
+    error: authError,
+  } = await supabase.auth.getUser();
+
+  if (authError || !user) {
+    return {
+      success: false,
+      leadId,
+      pipeline_stage: "failed",
+      error: "Unauthorized",
+    };
+  }
+
+  if (!leadId?.trim()) {
+    return {
+      success: false,
+      leadId: leadId ?? "",
+      pipeline_stage: "failed",
+      error: "Lead ID is required",
+    };
+  }
+
+  return runGenerateEmailForLead(supabase, user.id, leadId.trim(), options);
+};
+
+/** Pipeline Step 5: SMTP send drafted email → sent_emails, stage = sent */
+export const sendEmailForLead = async (
+  leadId: string,
+  emailId: string
+): Promise<SendLeadEmailResult> => {
+  const supabase = await createClient();
+  const {
+    data: { user },
+    error: authError,
+  } = await supabase.auth.getUser();
+
+  if (authError || !user) {
+    return {
+      success: false,
+      leadId,
+      emailId,
+      pipeline_stage: "failed",
+      error: "Unauthorized",
+    };
+  }
+
+  if (!leadId?.trim() || !emailId?.trim()) {
+    return {
+      success: false,
+      leadId: leadId ?? "",
+      emailId: emailId ?? "",
+      pipeline_stage: "failed",
+      error: "Lead ID and email ID are required",
+    };
+  }
+
+  const origin = (await headers()).get("origin");
+  const appBaseUrl =
+    process.env.NEXT_PUBLIC_APP_URL ||
+    origin ||
+    undefined;
+
+  return runSendEmailForLead(
+    supabase,
+    user.id,
+    leadId.trim(),
+    emailId.trim(),
+    { appBaseUrl }
+  );
 };
 
 export const scrapeLeadsAction = async (niche: string, location: string, maxResults: number = 100) => {
@@ -1116,15 +1231,13 @@ export const sendAIReplyAction = async (
 
     // Send email via SMTP
     const smtpManager = new SMTPManager();
-    await smtpManager.initialize();
+    await smtpManager.loadAccounts(userId);
 
-    const result = await smtpManager.sendEmail({
-      to: originalReply.from_email,
-      subject: aiReply.subject || `Re: ${originalReply.subject}`,
-      html: aiReply.body.replace(/\n/g, "<br>"),
-      inReplyTo: originalReply.smtp_message_id,
-      references: originalReply.smtp_message_id,
-    });
+    const result = await smtpManager.sendEmail(
+      originalReply.from_email,
+      aiReply.subject || `Re: ${originalReply.subject}`,
+      aiReply.body.replace(/\n/g, "<br>")
+    );
 
     if (!result.success) {
       throw new Error(result.error || "Failed to send email");
