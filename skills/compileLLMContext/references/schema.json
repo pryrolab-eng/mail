@@ -1,0 +1,1 @@
+{"input":{"businessFacts":"array","contacts":"array"},"output":{"facts":"array","missingFields":"string[]","incompleteResearch":"boolean"}}

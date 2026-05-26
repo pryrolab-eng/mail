@@ -1,0 +1,1 @@
+{"input":{"lead":"object","evidence":"businessFacts[]","senderProfile":"object"},"output":{"subject":"string","body":"string","warnings":"string[]"}}

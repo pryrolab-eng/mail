@@ -26,6 +26,23 @@ export function inferEmailMetaFromScrapedLead(lead: ScrapedLead): {
   }
 
   const status = (lead.email_verify_status ?? '').toLowerCase();
+  const domain = lead.email.split('@')[1]?.toLowerCase() ?? '';
+  const freePersonal = [
+    'gmail.com',
+    'yahoo.com',
+    'hotmail.com',
+    'outlook.com',
+    'live.com',
+    'icloud.com',
+    'aol.com',
+    'proton.me',
+    'protonmail.com',
+  ].includes(domain);
+
+  if (freePersonal || status === 'personal_review') {
+    return { email_source: 'unknown', email_confidence: 'low' };
+  }
+
   const mailto =
     lead.email_from_website &&
     lead.email?.toLowerCase() === lead.email_from_website.toLowerCase();

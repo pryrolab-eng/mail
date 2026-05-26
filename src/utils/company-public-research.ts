@@ -188,6 +188,21 @@ export function buildStructuredResearchBlock(fields: {
   publicSnippets?: string;
   sources: string[];
 }): string {
+  const cleanText = (value: string | undefined): string => {
+    const text = (value ?? "").replace(/\s+/g, " ").trim();
+    const lower = text.toLowerCase();
+    const jsDisabledCount = (lower.match(/javascript is disabled/g) ?? []).length;
+    if (jsDisabledCount >= 2) return "";
+    if (
+      text.length < 140 &&
+      /javascript is disabled|enable javascript|captcha|access denied|forbidden|cloudflare/i.test(text)
+    ) {
+      return "";
+    }
+    return text;
+  };
+  const websiteText = cleanText(fields.websiteText);
+  const publicSnippets = cleanText(fields.publicSnippets);
   const lines = [
     "[RESEARCH]",
     `Company: ${fields.companyName}`,
@@ -201,14 +216,14 @@ export function buildStructuredResearchBlock(fields: {
   }
   if (fields.theirPhrases.length) {
     lines.push(
-      `Their words: "${fields.theirPhrases.slice(0, 4).join('" | "')}"`
+      `Evidence phrases: ${JSON.stringify(fields.theirPhrases.slice(0, 4))}`
     );
   }
-  if (fields.websiteText?.trim()) {
-    lines.push(`Website excerpt: ${fields.websiteText.trim().slice(0, 600)}`);
+  if (websiteText) {
+    lines.push(`Website evidence: ${websiteText.slice(0, 600)}`);
   }
-  if (fields.publicSnippets?.trim()) {
-    lines.push(`Public listings: ${fields.publicSnippets.trim().slice(0, 500)}`);
+  if (publicSnippets) {
+    lines.push(`Public evidence: ${publicSnippets.slice(0, 500)}`);
   }
   if (fields.sources.length) {
     lines.push(`Sources: ${fields.sources.slice(0, 5).join(", ")}`);

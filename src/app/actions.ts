@@ -4,7 +4,7 @@ import { encodedRedirect } from "@/utils/utils";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { createClient } from "../../supabase/server";
-import { scrapeWithoutAPI } from "@/utils/puppeteer-scraper";
+import { createServiceClient } from "../../supabase/service";
 import { SMTPManager } from "@/utils/smtp-server";
 import { generatePersonalizedEmail } from "@/utils/smtp-manager";
 import { runLeadResearch } from "@/utils/lead-research";
@@ -13,6 +13,7 @@ import { runGenerateEmailForLead } from "@/utils/lead-email-generation";
 import type { GenerateEmailResult } from "@/utils/lead-email-generation";
 import { runSendEmailForLead } from "@/utils/lead-pipeline-send";
 import type { SendLeadEmailResult } from "@/utils/lead-pipeline-send";
+import { enqueueAutomationJob } from "@/utils/automation-queue";
 
 export async function signUpAction(formData: FormData) {
   const { signUpAction: run } = await import("@/lib/auth-actions");
@@ -155,7 +156,21 @@ export const scrapeLeadsAction = async (niche: string, location: string, maxResu
     console.log('Location:', location);
     console.log('Max Results:', maxResults);
 
-    const leads = await scrapeWithoutAPI(niche, location, maxResults);
+    const supabase = await createClient();
+    const {
+      data: { user },
+      error: authError,
+    } = await supabase.auth.getUser();
+    if (authError || !user) throw new Error("Unauthorized");
+    if (!niche?.trim()) throw new Error("Niche is required");
+
+    const service = createServiceClient();
+    const jobId = await enqueueAutomationJob(service, user.id, "agent_discover", {
+      niche: niche.trim(),
+      location: location?.trim() ?? "",
+      maxResults: Math.max(1, Math.min(Number(maxResults ?? 25), 100)),
+    });
+    const leads: Array<{ emailIsReal?: boolean }> = [];
 
     // Returns leads with REAL verified emails + fallback emails for businesses with websites.
     // emailIsReal flag indicates which are verified (true) vs fallback guesses (false).
@@ -166,7 +181,8 @@ export const scrapeLeadsAction = async (niche: string, location: string, maxResu
       success: true,
       leads,
       count: leads.length,
-      method: 'puppeteer',
+      method: 'agent_queued',
+      jobId,
     };
   } catch (error) {
     console.error('=== Scraping Error ===');

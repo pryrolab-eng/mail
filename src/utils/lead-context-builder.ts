@@ -74,7 +74,7 @@ export function isWeakLeadContext(
   if (MAPS_STUB_PATTERN.test(t.replace(/\s+/g, " ").trim())) return true;
   if (
     /^Website:\s*https?:\/\//i.test(t) &&
-    !/How they describe|Business type|Operations:|Website excerpt|Public listings/i.test(t) &&
+    !/How they describe|Business type|Operations:|Website evidence|Public evidence/i.test(t) &&
     t.length < 180
   ) {
     return true;

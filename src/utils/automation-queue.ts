@@ -7,6 +7,8 @@ import {
 } from "@/utils/automation-settings";
 
 export type AutomationJobType =
+  | "agent_discover"
+  | "research_lead"
   | "score_lead"
   | "generate_draft"
   | "send_approved_email"

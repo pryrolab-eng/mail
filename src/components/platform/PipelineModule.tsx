@@ -72,7 +72,162 @@ type LeadRow = Lead & {
   automation_fit_reason?: string | null;
   automation_risk?: string | null;
   automation_recommended_action?: string | null;
+  agent_confidence?: string | null;
+  agent_risk?: string | null;
+  agent_recommended_action?: string | null;
+  agent_email_angle?: string | null;
+  agent_draft_allowed?: boolean | null;
+  agent_auto_send_allowed?: boolean | null;
+  agent_last_run_at?: string | null;
 };
+
+type DrawerEvidence = {
+  id: string;
+  title: string | null;
+  source_url: string;
+  source_type: string;
+  confidence: string;
+  is_official_candidate: boolean;
+  snippet: string | null;
+  extracted_facts?: {
+    facts?: string[];
+    businessFacts?: BusinessFact[];
+    emails?: string[];
+    phones?: string[];
+    socials?: string[];
+  } | null;
+};
+
+type BusinessFact = {
+  fact: string;
+  category: string;
+  source: string;
+  confidence: string;
+  salesRelevance: string;
+};
+
+type DrawerContact = {
+  id: string;
+  contact_type: string;
+  value: string;
+  verification_status: string;
+  confidence: string;
+  is_business_owned: boolean;
+  is_primary: boolean;
+};
+
+type DrawerSkillTrace = {
+  tool: string;
+  ok: boolean;
+  confidence?: string;
+  warnings?: string[];
+  output?: Record<string, unknown>;
+};
+
+function looksLikeUsefulContact(contact: DrawerContact): boolean {
+  if (contact.contact_type !== "phone") return true;
+  const clean = contact.value.trim();
+  const digits = clean.replace(/\D/g, "");
+  if (digits.length < 8 || digits.length > 15) return false;
+  if (/[a-z]/i.test(clean)) return false;
+  if (/[.]/.test(clean)) return false;
+  if (/^\d{1,3}(?:\.\d{1,3}){1,3}$/.test(contact.value)) return false;
+  if (/^\d+(?:[.\-]\d+)+$/.test(clean) && !clean.startsWith("+")) {
+    return false;
+  }
+  if (/^\d+$/.test(clean) && !clean.startsWith("0")) return false;
+  if (/^\d+$/.test(clean) && clean.startsWith("0") && digits.length > 11) return false;
+  if (!/^\+|\(\d{1,4}\)|^0/.test(clean)) return false;
+  return true;
+}
+
+function hasUsefulBusinessFacts(item: DrawerEvidence): boolean {
+  return visibleBusinessFacts(item.extracted_facts?.businessFacts ?? []).length > 0;
+}
+
+function visibleBusinessFacts(facts: BusinessFact[]): BusinessFact[] {
+  return facts.filter((fact) => {
+    const text = fact.fact.toLowerCase();
+    if (/&nbsp|-->|welco$|book an appointment welco/.test(text)) return false;
+    if (fact.category === "team_size" && /info@|toll free|opening hours|book an appointment/.test(text)) {
+      return false;
+    }
+    if (fact.category === "location" && !/\b(physical address|address:|located at|located in|near|street|avenue|road|kg\s*\d+|village|sector|cell|building|floor|suite)\b/i.test(fact.fact)) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function evidenceTitle(item: DrawerEvidence): string {
+  if (item.title?.startsWith("Fetched targeted page:")) {
+    try {
+      const path = new URL(item.source_url).pathname || "/";
+      if (/services/i.test(path)) return "Official services page";
+      if (/about/i.test(path)) return "Official about page";
+      if (/team|doctor/i.test(path)) return "Official team page";
+      if (/pricing|payment/i.test(path)) return "Official pricing/payment page";
+      if (/contact/i.test(path)) return "Official contact page";
+      return "Official homepage";
+    } catch {
+      return "Official page";
+    }
+  }
+  return item.title ?? item.source_url;
+}
+
+function parseResearchContext(ctx: string | null | undefined): {
+  company: string | null;
+  businessType: string | null;
+  operations: string | null;
+  businessFacts: BusinessFact[];
+  sources: string[];
+} {
+  if (!ctx?.trim()) {
+    return {
+      company: null,
+      businessType: null,
+      operations: null,
+      businessFacts: [],
+      sources: [],
+    };
+  }
+  const block = ctx.match(/\[RESEARCH\]([\s\S]*?)\[\/RESEARCH\]/)?.[1] ?? ctx;
+  const lineValue = (label: string) =>
+    block.match(new RegExp(`^${label}:\\s*(.+)$`, "m"))?.[1]?.trim() ?? null;
+  const factsRaw = block.match(/Business facts:\s*([\s\S]*?)(?:\nSources:|\n\[\/RESEARCH\]|$)/)?.[1]?.trim();
+  let businessFacts: BusinessFact[] = [];
+  if (factsRaw?.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(factsRaw);
+      if (Array.isArray(parsed)) {
+        businessFacts = parsed
+          .filter((item) => item && typeof item === "object" && typeof item.fact === "string")
+          .map((item) => ({
+            fact: String(item.fact),
+            category: String(item.category ?? "fact"),
+            source: String(item.source ?? ""),
+            confidence: String(item.confidence ?? "medium"),
+            salesRelevance: String(item.salesRelevance ?? "medium"),
+          }));
+      }
+    } catch {
+      businessFacts = [];
+    }
+  }
+  const sources =
+    lineValue("Sources")
+      ?.split(",")
+      .map((source) => source.trim())
+      .filter(Boolean) ?? [];
+  return {
+    company: lineValue("Company"),
+    businessType: lineValue("Business type"),
+    operations: lineValue("Operations"),
+    businessFacts,
+    sources,
+  };
+}
 
 const PIPELINE_COLUMNS: {
   key: PipelineStage | "sent_group";
@@ -141,6 +296,9 @@ export default function PipelineModule({
     sent_at: string;
     status: string;
   } | null>(null);
+  const [drawerEvidence, setDrawerEvidence] = useState<DrawerEvidence[]>([]);
+  const [drawerContacts, setDrawerContacts] = useState<DrawerContact[]>([]);
+  const [drawerSkillTrace, setDrawerSkillTrace] = useState<DrawerSkillTrace[]>([]);
   const [sendPreview, setSendPreview] = useState<{
     lead: LeadRow;
     draft: { id: string; subject: string | null; body: string | null };
@@ -298,7 +456,7 @@ export default function PipelineModule({
     const { data: leadData, error: leadError } = await supabase
       .from("leads")
       .select(
-        "id, user_id, company_name, email, phone, website, niche, location, company_context, status, notes, pipeline_stage, pipeline_error, pipeline_updated_at, email_source, email_confidence, automation_score, automation_fit_reason, automation_risk, automation_recommended_action, created_at, updated_at"
+        "id, user_id, company_name, email, phone, website, niche, location, company_context, status, notes, pipeline_stage, pipeline_error, pipeline_updated_at, email_source, email_confidence, automation_score, automation_fit_reason, automation_risk, automation_recommended_action, agent_confidence, agent_risk, agent_recommended_action, agent_email_angle, agent_draft_allowed, agent_auto_send_allowed, agent_last_run_at, created_at, updated_at"
       )
       .eq("user_id", userId)
       .not("pipeline_stage", "is", null)
@@ -429,7 +587,7 @@ export default function PipelineModule({
         const updated = (await supabase
           .from("leads")
           .select(
-            "id, user_id, company_name, email, phone, website, niche, location, company_context, status, notes, pipeline_stage, pipeline_error, pipeline_updated_at, email_source, email_confidence, automation_score, automation_fit_reason, automation_risk, automation_recommended_action, created_at, updated_at"
+            "id, user_id, company_name, email, phone, website, niche, location, company_context, status, notes, pipeline_stage, pipeline_error, pipeline_updated_at, email_source, email_confidence, automation_score, automation_fit_reason, automation_risk, automation_recommended_action, agent_confidence, agent_risk, agent_recommended_action, agent_email_angle, agent_draft_allowed, agent_auto_send_allowed, agent_last_run_at, created_at, updated_at"
           )
           .eq("id", leadId)
           .single()).data as LeadRow | null;
@@ -464,6 +622,32 @@ export default function PipelineModule({
       .maybeSingle();
     setDrawerDraft((data as GeneratedEmail) ?? null);
 
+    const [{ data: evidence }, { data: contacts }, { data: run }] = await Promise.all([
+      supabase
+        .from("lead_evidence")
+        .select("id, title, source_url, source_type, confidence, is_official_candidate, snippet, extracted_facts")
+        .eq("lead_id", lead.id)
+        .order("created_at", { ascending: false })
+        .limit(8),
+      supabase
+        .from("contact_points")
+        .select("id, contact_type, value, verification_status, confidence, is_business_owned, is_primary")
+        .eq("lead_id", lead.id)
+        .order("is_primary", { ascending: false })
+        .order("created_at", { ascending: false })
+        .limit(8),
+      supabase
+        .from("agent_runs")
+        .select("tool_calls")
+        .eq("lead_id", lead.id)
+        .order("started_at", { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+    ]);
+    setDrawerEvidence((evidence as DrawerEvidence[]) ?? []);
+    setDrawerContacts(((contacts as DrawerContact[]) ?? []).filter(looksLikeUsefulContact));
+    setDrawerSkillTrace(((run?.tool_calls as DrawerSkillTrace[] | null) ?? []).slice(0, 12));
+
     if (lead.pipeline_stage === "sent" || lead.pipeline_stage === "replied") {
       const { data: sent } = await supabase
         .from("sent_emails")
@@ -489,11 +673,7 @@ export default function PipelineModule({
     setSendPreview({ lead, draft });
   };
 
-  const researchPreview = (ctx: string | null | undefined) => {
-    if (!ctx?.trim()) return "No context yet";
-    const block = ctx.match(/\[RESEARCH\][\s\S]*?\[\/RESEARCH\]/)?.[0] ?? ctx;
-    return block.replace(/\[\/?RESEARCH\]/g, "").trim().slice(0, 400);
-  };
+  const parsedResearch = parseResearchContext(drawerLead?.company_context);
 
   const stats = {
     total: leads.length,
@@ -786,13 +966,180 @@ export default function PipelineModule({
                 </div>
               )}
 
+              {(drawerLead.agent_recommended_action ||
+                drawerLead.agent_confidence ||
+                drawerLead.agent_email_angle) && (
+                <div>
+                  <p className="text-[10px] uppercase tracking-widest text-gray-400 font-semibold mb-1.5">
+                    Agent decision
+                  </p>
+                  <div className="text-xs text-gray-700 leading-relaxed bg-blue-50 border border-blue-200 rounded-lg p-3 space-y-1">
+                    <p>
+                      <span className="font-semibold">Action:</span>{" "}
+                      {drawerLead.agent_recommended_action ?? "review"} ·{" "}
+                      <span className="font-semibold">Confidence:</span>{" "}
+                      {drawerLead.agent_confidence ?? "low"} ·{" "}
+                      <span className="font-semibold">Risk:</span>{" "}
+                      {drawerLead.agent_risk ?? "medium"}
+                    </p>
+                    {drawerLead.agent_email_angle && (
+                      <p>{drawerLead.agent_email_angle}</p>
+                    )}
+                    <p className="text-[10px] text-blue-700">
+                      Draft {drawerLead.agent_draft_allowed ? "allowed" : "blocked"} · Auto-send{" "}
+                      {drawerLead.agent_auto_send_allowed ? "allowed" : "blocked"}
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {(drawerContacts.length > 0 || drawerEvidence.length > 0) && (
+                <div>
+                  <p className="text-[10px] uppercase tracking-widest text-gray-400 font-semibold mb-1.5">
+                    Agent evidence
+                  </p>
+                  {drawerContacts.length > 0 && (
+                    <div className="mb-2 flex flex-col gap-1">
+                      {drawerContacts.map((contact) => (
+                        <div
+                          key={contact.id}
+                          className="flex items-center justify-between gap-2 rounded-md border border-gray-200 bg-white px-2 py-1.5 text-[11px]"
+                        >
+                          <span className="truncate">
+                            {contact.is_primary ? "Primary " : ""}
+                            {contact.contact_type}: {contact.value}
+                          </span>
+                          <span className="shrink-0 text-gray-500">
+                            {contact.verification_status} · {contact.confidence}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <div className="flex flex-col gap-1.5">
+                    {drawerEvidence.filter(hasUsefulBusinessFacts).map((item) => (
+                      <a
+                        key={item.id}
+                        href={item.source_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="block rounded-md border border-gray-200 bg-gray-50 px-2 py-1.5 text-[11px] hover:bg-gray-100"
+                      >
+                        <span className="font-semibold text-gray-800">
+                          {evidenceTitle(item)}
+                        </span>
+                        <span className="ml-1 text-gray-500">
+                          {item.source_type} · {item.confidence}
+                          {item.is_official_candidate ? " · official candidate" : ""}
+                        </span>
+                        {!!visibleBusinessFacts(item.extracted_facts?.businessFacts ?? []).length && (
+                          <div className="mt-1 space-y-0.5 text-gray-500">
+                            {visibleBusinessFacts(item.extracted_facts?.businessFacts ?? []).slice(0, 3).map((fact, idx) => (
+                              <p key={`${item.id}-fact-${idx}`} className="line-clamp-1">
+                                <span className="font-medium text-gray-700">
+                                  {fact.category}
+                                </span>
+                                {" · "}
+                                {fact.fact}
+                              </p>
+                            ))}
+                          </div>
+                        )}
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {drawerSkillTrace.length > 0 && (
+                <div>
+                  <p className="text-[10px] uppercase tracking-widest text-gray-400 font-semibold mb-1.5">
+                    Agent skills
+                  </p>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {drawerSkillTrace.map((skill, idx) => (
+                      <div
+                        key={`${skill.tool}-${idx}`}
+                        className="rounded-md border border-gray-200 bg-white px-2 py-1.5 text-[11px]"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-semibold text-gray-800 truncate">
+                            {skill.tool}
+                          </span>
+                          <span className={skill.ok ? "text-green-600" : "text-amber-600"}>
+                            {skill.ok ? "ok" : "fallback"}
+                          </span>
+                        </div>
+                        {(skill.confidence || skill.warnings?.length) && (
+                          <p className="mt-0.5 line-clamp-1 text-gray-500">
+                            {skill.confidence ? `${skill.confidence} confidence` : ""}
+                            {skill.warnings?.length ? ` · ${skill.warnings[0]}` : ""}
+                          </p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <div>
                 <p className="text-[10px] uppercase tracking-widest text-gray-400 font-semibold mb-1.5">
                   Research context
                 </p>
-                <p className="text-xs text-gray-700 leading-relaxed whitespace-pre-wrap bg-gray-50 border border-gray-200 rounded-lg p-3 max-h-40 overflow-y-auto">
-                  {researchPreview(drawerLead.company_context)}
-                </p>
+                <div className="text-xs text-gray-700 bg-gray-50 border border-gray-200 rounded-lg p-3 max-h-56 overflow-y-auto">
+                  {parsedResearch.company || parsedResearch.businessFacts.length ? (
+                    <div className="space-y-2">
+                      {(parsedResearch.company || parsedResearch.businessType) && (
+                        <div>
+                          {parsedResearch.company && (
+                            <p className="font-semibold text-gray-900">
+                              {parsedResearch.company}
+                            </p>
+                          )}
+                          {parsedResearch.businessType && (
+                            <p className="text-gray-500">
+                              {parsedResearch.businessType}
+                            </p>
+                          )}
+                          {parsedResearch.operations && (
+                            <p className="mt-1 text-gray-600">
+                              {parsedResearch.operations}
+                            </p>
+                          )}
+                        </div>
+                      )}
+                      {parsedResearch.businessFacts.length > 0 ? (
+                        <div className="space-y-1.5">
+                          {parsedResearch.businessFacts.slice(0, 5).map((fact, idx) => (
+                            <div
+                              key={`${fact.category}-${idx}`}
+                              className="rounded-md border border-gray-200 bg-white px-2 py-1.5"
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="font-semibold text-gray-800">
+                                  {fact.category.replace(/_/g, " ")}
+                                </span>
+                                <span className="text-[10px] text-gray-500">
+                                  {fact.salesRelevance} relevance
+                                </span>
+                              </div>
+                              <p className="mt-0.5 leading-relaxed text-gray-700">
+                                {fact.fact}
+                              </p>
+                              <p className="mt-0.5 truncate text-[10px] text-gray-400">
+                                {fact.source}
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p>No typed business facts yet. Re-run research.</p>
+                      )}
+                    </div>
+                  ) : (
+                    <p>No context yet</p>
+                  )}
+                </div>
               </div>
 
               {drawerDraft && (

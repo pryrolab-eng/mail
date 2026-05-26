@@ -141,6 +141,15 @@ async function claimJob() {
   return claimed;
 }
 
+function transientWorkerError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /fetch failed|network|timeout|terminated|ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN/i.test(message);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function completeJob(job) {
   await supabase
     .from("automation_jobs")
@@ -446,6 +455,9 @@ async function generateDraft(job) {
     .single();
   if (error || !lead) throw new Error(error?.message ?? "Lead not found");
   if (!lead.email) throw new Error("Lead has no email");
+  if (lead.agent_draft_allowed === false) {
+    throw new Error("Agent blocked drafting for this lead");
+  }
   if ((lead.automation_score ?? 0) < 70) {
     throw new Error("Lead score is below v1 draft threshold");
   }
@@ -495,7 +507,7 @@ Write a personalized email under 140 words. Mention one relevant operational pai
   log("drafted", lead.email, saved.id);
 }
 
-async function triggerLocal(pathname, method = "GET") {
+async function triggerLocal(pathname, method = "GET", body = null) {
   const secret = process.env.CRON_SECRET;
   const appUrl = (process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000").replace(/\/$/, "");
   if (!secret) {
@@ -504,7 +516,11 @@ async function triggerLocal(pathname, method = "GET") {
   }
   const res = await fetch(`${appUrl}${pathname}`, {
     method,
-    headers: { authorization: `Bearer ${secret}` },
+    headers: {
+      authorization: `Bearer ${secret}`,
+      ...(body ? { "Content-Type": "application/json" } : {}),
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
   });
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
@@ -513,8 +529,23 @@ async function triggerLocal(pathname, method = "GET") {
 }
 
 async function handleJob(job) {
-  if (job.job_type === "send_approved_email") {
+  if (job.job_type === "agent_discover") {
+    await triggerLocal("/api/automation/discover", "POST", {
+      userId: job.user_id,
+      niche: job.payload?.niche,
+      location: job.payload?.location,
+      maxResults: job.payload?.maxResults,
+      generateDrafts: job.payload?.generateDrafts ?? false,
+    });
+  } else if (job.job_type === "send_approved_email") {
     await sendQueuedEmail(job.user_id, job.payload?.leadId ?? null);
+  } else if (job.job_type === "research_lead") {
+    const leadId = job.payload?.leadId;
+    if (!leadId) throw new Error("research_lead requires payload.leadId");
+    await triggerLocal("/api/automation/research", "POST", {
+      leadId,
+      userId: job.user_id,
+    });
   } else if (job.job_type === "score_lead") {
     await scoreLead(job);
   } else if (job.job_type === "process_followups") {
@@ -522,16 +553,39 @@ async function handleJob(job) {
   } else if (job.job_type === "check_inbox") {
     await triggerLocal("/api/inbox/check", "GET");
   } else if (job.job_type === "generate_draft") {
-    await generateDraft(job);
+    const leadId = job.payload?.leadId;
+    if (!leadId) throw new Error("generate_draft requires payload.leadId");
+    await triggerLocal("/api/automation/generate-draft", "POST", {
+      leadId,
+      userId: job.user_id,
+    });
   } else {
     throw new Error(`Unknown job type: ${job.job_type}`);
   }
 }
 
 async function tick() {
-  const job = await claimJob();
+  let job = null;
+  try {
+    job = await claimJob();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log(
+      transientWorkerError(err) ? "claim retry later" : "claim failed",
+      message
+    );
+    return false;
+  }
   if (!job) {
-    await sendDueQueues();
+    try {
+      await sendDueQueues();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log(
+        transientWorkerError(err) ? "queue scan retry later" : "queue scan failed",
+        message
+      );
+    }
     return false;
   }
   log("claimed", job.job_type, job.id);
@@ -560,6 +614,10 @@ async function sendDueQueues() {
 
 log("started", once ? "(once)" : `(poll ${pollMs}ms)`);
 do {
-  await tick();
-  if (!once) await new Promise((r) => setTimeout(r, pollMs));
+  try {
+    await tick();
+  } catch (err) {
+    log("tick failed", err instanceof Error ? err.message : err);
+  }
+  if (!once) await sleep(pollMs);
 } while (!once);

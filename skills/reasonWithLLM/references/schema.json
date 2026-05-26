@@ -1,0 +1,1 @@
+{"input":{"provider":"string","compactEvidence":"object"},"output":{"recommendedAction":"string","confidence":"high|medium|low","risk":"low|medium|high"}}

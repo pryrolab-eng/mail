@@ -56,6 +56,19 @@ export function bingSearchUrl(query: string, location: string): string {
   return `https://www.bing.com/search?q=${encodeURIComponent(query)}&count=30&cc=${cc}&mkt=${mkt}&setlang=en`;
 }
 
+export function googleSearchUrl(query: string, location = ''): string {
+  const rw = /rwanda|kigali/i.test(location);
+  const gl = rw ? 'rw' : 'us';
+  return `https://www.google.com/search?q=${encodeURIComponent(query)}&num=10&hl=en&gl=${gl}&filter=0`;
+}
+
+export function isGoogleBlockedHtml(html: string): boolean {
+  return (
+    /unusual traffic|sorry\/index|captcha|detected unusual|enable javascript/i.test(html) ||
+    ((html.match(/<a /g) ?? []).length < 5 && html.length < 30_000)
+  );
+}
+
 export function parseBingHits(html: string, max = 30): SearchHit[] {
   const decoded = html
     .replace(/\s*\[at\]\s*/gi, '@')
@@ -94,6 +107,64 @@ export function parseBingHits(html: string, max = 30): SearchHit[] {
     const snippet = snippetMatch?.[1]?.replace(/<[^>]+>/g, '').trim() ?? '';
 
     hits.push({ title, url, snippet });
+  }
+
+  return hits;
+}
+
+function cleanGoogleUrl(raw: string): string {
+  const decoded = decodeHtmlEntities(raw);
+  try {
+    const url = new URL(decoded.startsWith('http') ? decoded : `https://www.google.com${decoded}`);
+    if (url.pathname === '/url') {
+      return url.searchParams.get('q') ?? '';
+    }
+    return decoded;
+  } catch {
+    return decoded;
+  }
+}
+
+export function parseGoogleHits(html: string, max = 12): SearchHit[] {
+  const decoded = html
+    .replace(/\s*\[at\]\s*/gi, '@')
+    .replace(/\s*\(at\)\s*/gi, '@')
+    .replace(/\s*\[dot\]\s*/gi, '.')
+    .replace(/\s*\(dot\)\s*/gi, '.');
+  const hits: SearchHit[] = [];
+  const seen = new Set<string>();
+
+  const blockRe = /<div[^>]+class="[^"]*(?:MjjYud|g)[^"]*"[^>]*>([\s\S]*?)(?=<div[^>]+class="[^"]*(?:MjjYud|g)[^"]*"|<\/body>)/gi;
+  let match: RegExpExecArray | null;
+  while ((match = blockRe.exec(decoded)) !== null && hits.length < max) {
+    const block = match[1];
+    const link = block.match(/<a[^>]+href="([^"]+)"[^>]*>[\s\S]*?<h3[^>]*>([\s\S]*?)<\/h3>/i);
+    if (!link) continue;
+    const url = cleanGoogleUrl(link[1]);
+    if (!/^https?:\/\//i.test(url) || /google\.(?:com|co|rw)\/(?:search|url|maps|imgres)/i.test(url)) {
+      continue;
+    }
+    const title = link[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!title || seen.has(url)) continue;
+    const snippet =
+      block.match(/<div[^>]+class="[^"]*(?:VwiC3b|yXK7lf|lEBKkf)[^"]*"[^>]*>([\s\S]*?)<\/div>/i)?.[1]
+        ?.replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim() ?? '';
+    seen.add(url);
+    hits.push({ title, url, snippet });
+  }
+
+  if (hits.length > 0) return hits;
+
+  const anchorRe = /<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  while ((match = anchorRe.exec(decoded)) !== null && hits.length < max) {
+    const url = cleanGoogleUrl(match[1]);
+    if (!/^https?:\/\//i.test(url) || /google\./i.test(url) || seen.has(url)) continue;
+    const title = match[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    if (title.length < 4) continue;
+    seen.add(url);
+    hits.push({ title, url, snippet: '' });
   }
 
   return hits;
@@ -156,7 +227,7 @@ async function httpGetSearch(url: string): Promise<{ html: string; status: numbe
       'User-Agent': randomSearchUA(),
       Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       'Accept-Language': 'en-US,en;q=0.9',
-      Referer: 'https://www.bing.com/',
+      Referer: url.includes('google.com') ? 'https://www.google.com/' : 'https://www.bing.com/',
     },
     signal: AbortSignal.timeout(15_000),
   });
@@ -223,7 +294,7 @@ function delay(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-function puppeteerForced(engine: 'bing' | 'ddg'): boolean {
+function puppeteerForced(engine: 'bing' | 'ddg' | 'google'): boolean {
   const v = process.env.SEARCH_USE_PUPPETEER?.trim().toLowerCase();
   if (v === 'all' || v === '1' || v === 'true') return true;
   return v === engine || (v?.split(',').map((s) => s.trim()).includes(engine) ?? false);
@@ -258,6 +329,31 @@ export async function fetchBingHtml(
 }
 
 /** Fetch DDG results (html POST → lite GET → Puppeteer). */
+/** Fetch Google SERP HTML (HTTP, optional Puppeteer if blocked or env). */
+export async function fetchGoogleHtml(
+  query: string,
+  location = ''
+): Promise<{ html: string; via: 'http' | 'puppeteer'; blocked: boolean }> {
+  const url = googleSearchUrl(query, location);
+  const { html, status } = await httpGetSearch(url);
+  if (
+    status === 200 &&
+    !isGoogleBlockedHtml(html) &&
+    parseGoogleHits(html).length > 0
+  ) {
+    return { html, via: 'http', blocked: false };
+  }
+
+  if (puppeteerForced('google') || puppeteerFallbackEnabled()) {
+    console.log('  🔎 Google: HTTP weak — retry with browser...');
+    const browserHtml = await fetchHtmlWithBrowser(url);
+    const blocked = isGoogleBlockedHtml(browserHtml);
+    return { html: browserHtml, via: 'puppeteer', blocked };
+  }
+
+  return { html, via: 'http', blocked: true };
+}
+
 export async function fetchDdgHtml(query: string): Promise<{
   html: string;
   via: 'http' | 'lite' | 'puppeteer';

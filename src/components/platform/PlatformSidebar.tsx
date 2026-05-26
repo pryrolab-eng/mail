@@ -1,7 +1,7 @@
 "use client";
 
 import { ActiveModule } from "@/types/platform";
-import { Radio, Mail, Settings, Layout, Server, Send, Megaphone, Workflow } from "lucide-react";
+import { Radio, Mail, Settings, Layout, Server, Send, Megaphone, Workflow, Puzzle } from "lucide-react";
 
 interface SidebarProps {
   activeModule: ActiveModule;
@@ -44,6 +44,7 @@ function buildNavGroups(pipelineActionCount: number) {
       label: "Management",
       items: [
         { id: "crm" as ActiveModule, label: "CRM", icon: Layout, badge: null },
+        { id: "skills" as ActiveModule, label: "Skills", icon: Puzzle, badge: null },
       ],
     },
     {

@@ -1,0 +1,1 @@
+{"good":[{"action":"auto_queue","requires":"verified official-domain email"}],"bad":[{"action":"auto_queue","reason":"guessed email"}]}

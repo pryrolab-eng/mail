@@ -51,6 +51,7 @@ export type PipelineStage =
   | 'completed'
   | 'failed';
 
+
 export const PIPELINE_STAGES: PipelineStage[] = [
   'scraped',
   'verified',
@@ -100,6 +101,52 @@ export interface Lead {
   automation_review_required?: boolean | null;
   automation_last_scored_at?: string | null;
   automation_rejected_reason?: string | null;
+  agent_confidence?: string | null;
+  agent_risk?: string | null;
+  agent_recommended_action?: string | null;
+  agent_email_angle?: string | null;
+  agent_draft_allowed?: boolean | null;
+  agent_auto_send_allowed?: boolean | null;
+  agent_last_run_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type AgentSourceType =
+  | 'official_site'
+  | 'directory'
+  | 'social'
+  | 'search_result'
+  | 'unrelated';
+
+export interface LeadEvidence {
+  id: string;
+  user_id: string;
+  lead_id: string;
+  agent_run_id: string | null;
+  source_type: AgentSourceType;
+  source_url: string;
+  title: string | null;
+  snippet: string | null;
+  extracted_facts: Record<string, unknown>;
+  confidence: 'high' | 'medium' | 'low';
+  is_official_candidate: boolean;
+  created_at: string;
+}
+
+export interface ContactPoint {
+  id: string;
+  user_id: string;
+  lead_id: string;
+  agent_run_id: string | null;
+  contact_type: 'email' | 'phone' | 'social' | 'website';
+  value: string;
+  source_url: string | null;
+  source_type: AgentSourceType | null;
+  verification_status: 'verified' | 'unverified' | 'no_mx' | 'suppressed' | 'invalid';
+  confidence: 'high' | 'medium' | 'low';
+  is_business_owned: boolean;
+  is_primary: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -419,6 +466,7 @@ export type ActiveModule =
   | 'pipeline'
   | 'email-writer'
   | 'crm'
+  | 'skills'
   | 'ai-settings'
   | 'smtp-manager'
   | 'follow-up'

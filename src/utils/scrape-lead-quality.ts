@@ -69,6 +69,18 @@ const JUNK_WEBSITE_DOMAINS = [
   "duckduckgo.com",
 ];
 
+const FREE_PERSONAL_EMAIL_DOMAINS = new Set([
+  "gmail.com",
+  "yahoo.com",
+  "hotmail.com",
+  "outlook.com",
+  "live.com",
+  "icloud.com",
+  "aol.com",
+  "proton.me",
+  "protonmail.com",
+]);
+
 /** If the search targets this region, reject pages mentioning these places (unless local tokens also match) */
 const FOREIGN_PLACE_HINTS = [
   "serbia",
@@ -213,6 +225,11 @@ function emailMatchesWebsiteDomain(
     host.endsWith(`.${emailDomain}`) ||
     emailDomain.endsWith(host)
   );
+}
+
+function isFreePersonalEmail(email: string): boolean {
+  const domain = email.split("@")[1]?.toLowerCase();
+  return !!domain && FREE_PERSONAL_EMAIL_DOMAINS.has(domain);
 }
 
 /**
@@ -447,7 +464,12 @@ export function isJunkScrapeLead(
   } else {
     if (!lead.email?.trim() || isJunkEmail(lead.email)) return true;
     if (isJunkWebsite(lead.website)) return true;
-    if (!emailMatchesWebsiteDomain(lead.email, lead.website)) return true;
+    if (
+      !emailMatchesWebsiteDomain(lead.email, lead.website) &&
+      !isFreePersonalEmail(lead.email)
+    ) {
+      return true;
+    }
   }
 
   const leadLocation =

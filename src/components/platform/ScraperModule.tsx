@@ -1197,11 +1197,14 @@ export default function ScraperModule({
 
           {scrapeSummary && !isScraping && (
             <p className="text-xs text-gray-600 mb-3 bg-blue-50 border border-blue-100 rounded-lg px-3 py-2">
-              <strong>Run summary:</strong> {scrapeSummary.withEmail} with email (
+              <strong>Run summary:</strong> {scrapeSummary.withEmail} scraped with email (
               {scrapeSummary.realEmails} from website crawl) · {scrapeSummary.crmAdded}{" "}
               saved to CRM · {scrapeSummary.researched} researched
               {scrapeSummary.callListAdded > 0
                 ? ` · ${scrapeSummary.callListAdded} call list (phone only — use Pipeline → Retry enrich)`
+                : ""}
+              {scrapeSummary.withEmail !== scrapeSummary.crmAdded
+                ? " · scraped count includes raw email finds; saved count excludes duplicates, failed verification, existing CRM rows, and review-only filtered leads"
                 : ""}
             </p>
           )}

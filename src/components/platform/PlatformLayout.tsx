@@ -13,6 +13,7 @@ import AISettingsModule from "./AISettingsModule";
 import SMTPManager from "./SMTPManager";
 import FollowUpModule from "./FollowUpModule";
 import CampaignsModule from "./CampaignsModule";
+import SkillsModule from "./SkillsModule";
 import { createClient } from "../../../supabase/client";
 import { useRouter } from "next/navigation";
 
@@ -185,6 +186,10 @@ export default function PlatformLayout({ userId, userEmail }: PlatformLayoutProp
               onWriteEmail={handleWriteEmailFromCRM}
             />
           </div>
+
+          <LazyModule active={activeModule === "skills"}>
+            <SkillsModule />
+          </LazyModule>
 
           {/* Lazy-mounted modules */}
           <LazyModule active={activeModule === "email-writer"}>

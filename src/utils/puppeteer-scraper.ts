@@ -570,6 +570,21 @@ function normalizeSearchText(value: string): string {
     .toLowerCase();
 }
 
+function isFreePersonalEmailAddress(email: string | null | undefined): boolean {
+  const domain = email?.split('@')[1]?.toLowerCase();
+  return !!domain && [
+    'gmail.com',
+    'yahoo.com',
+    'hotmail.com',
+    'outlook.com',
+    'live.com',
+    'icloud.com',
+    'aol.com',
+    'proton.me',
+    'protonmail.com',
+  ].includes(domain);
+}
+
 function companySearchTokens(companyName: string): string[] {
   return normalizeSearchText(companyName)
     .split(/[^a-z0-9]+/)
@@ -589,6 +604,23 @@ function companySearchTokens(companyName: string): string[] {
         ].includes(token)
     )
     .slice(0, 5);
+}
+
+function stripCompanyBranchQualifier(companyName: string): string {
+  return companyName
+    .replace(/\([^)]*\)/g, ' ')
+    .replace(/\b(kacyiru|town|kiyovu|nyarugenge|gasabo|kicukiro|branch)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function companySearchAcronym(companyName: string): string | null {
+  const words = stripCompanyBranchQualifier(companyName)
+    .split(/[^a-zA-Z0-9]+/)
+    .filter((word) => word.length >= 3)
+    .filter((word) => !/clinic|medical|dental|company|business/i.test(word));
+  if (words.length < 2) return null;
+  return words.map((word) => word[0]).join('').toUpperCase();
 }
 
 function candidateHost(url: string): string | null {
@@ -619,14 +651,25 @@ function isLikelyOfficialWebsiteHit(
   const host = normalizeSearchText(candidateHost(hit.url) ?? '');
   const blob = normalizeSearchText(`${hit.title} ${hit.snippet} ${hit.url}`);
   const tokens = companySearchTokens(companyName);
+  const baseTokens = companySearchTokens(stripCompanyBranchQualifier(companyName));
+  const acronym = companySearchAcronym(companyName)?.toLowerCase();
   const tokenHits = tokens.filter(
     (token) => blob.includes(token) || host.includes(token)
   ).length;
+  const baseHits = baseTokens.filter(
+    (token) => blob.includes(token) || host.includes(token)
+  ).length;
+  const acronymHit = !!acronym && blob.includes(acronym);
   const locationHint = /rwanda|kigali/i.test(location)
     ? /rwanda|kigali|\.rw\b/i.test(`${hit.title} ${hit.snippet} ${hit.url}`)
     : true;
 
-  return tokenHits >= Math.min(2, Math.max(1, tokens.length)) && locationHint;
+  return (
+    (tokenHits >= Math.min(2, Math.max(1, tokens.length)) ||
+      baseHits >= Math.min(2, Math.max(1, baseTokens.length)) ||
+      acronymHit) &&
+    locationHint
+  );
 }
 
 async function discoverOfficialWebsite(
@@ -634,11 +677,16 @@ async function discoverOfficialWebsite(
   location: string
 ): Promise<string | null> {
   const city = location.split(',')[0]?.trim() || location;
+  const baseName = stripCompanyBranchQualifier(companyName);
+  const acronym = companySearchAcronym(companyName);
   const queries = [
     `"${companyName}" "${city}" official website`,
+    `"${baseName}" "${city}" official website`,
     `"${companyName}" Rwanda contact website`,
+    `"${baseName}" Rwanda contact website`,
+    acronym ? `${acronym} ${city} Rwanda dental clinic` : '',
     `${companyName} ${city} Rwanda website -facebook -linkedin`,
-  ];
+  ].filter(Boolean);
   const seen = new Set<string>();
 
   try {
@@ -677,7 +725,10 @@ async function discoverOfficialWebsite(
         const html = await fetchWebpage(origin, 8_000);
         if (!html) continue;
         const text = normalizeSearchText(html.replace(/<[^>]+>/g, ' '));
-        const tokenHits = companySearchTokens(companyName).filter((token) =>
+        const tokenHits = [
+          ...companySearchTokens(companyName),
+          ...companySearchTokens(baseName),
+        ].filter((token) =>
           text.includes(token)
         ).length;
         if (tokenHits >= 1) {
@@ -1240,7 +1291,10 @@ async function scrapeGoogleMaps(
         const lead: ScrapedLead = {
           company_name: biz.name,
           email,
-          emailIsReal: true,
+          emailIsReal: !isFreePersonalEmailAddress(email),
+          email_verify_status: isFreePersonalEmailAddress(email)
+            ? 'personal_review'
+            : undefined,
           niche: enriched.niche,
           location: leadLocation,
           business_address: biz.address?.trim() || undefined,

@@ -1,0 +1,1 @@
+{"input":{"officialWebsite":"string|null","contacts":"array","evidence":"array"},"output":{"recommendedAction":"auto_queue|draft|review|phone_only|rejected","draftAllowed":"boolean","autoSendAllowed":"boolean"}}

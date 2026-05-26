@@ -8,6 +8,8 @@ export const runtime = "nodejs";
 
 const schema = z.object({
   jobType: z.enum([
+    "agent_discover",
+    "research_lead",
     "score_lead",
     "generate_draft",
     "send_approved_email",

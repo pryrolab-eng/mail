@@ -1,0 +1,1 @@
+{"input":{"companyName":"string","location":"string|null","website":"string|null","email":"string|null","phone":"string|null"},"output":{"hits":"number","officialCandidates":"number","warnings":"string[]"}}

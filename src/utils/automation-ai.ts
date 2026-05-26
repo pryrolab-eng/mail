@@ -9,7 +9,7 @@ export type AutomationLeadScore = {
   best_email: string | null;
   confidence: "high" | "medium" | "low";
   risk: "low" | "medium" | "high";
-  recommended_action: "draft" | "review" | "reject";
+  recommended_action: "auto_queue" | "draft" | "review" | "phone_only" | "reject";
 };
 
 const FALLBACK_SCORE: AutomationLeadScore = {
@@ -57,7 +57,7 @@ export function parseAutomationLeadScore(raw: string): AutomationLeadScore {
       : confidence === "high"
         ? "low"
         : "medium";
-    const recommended = ["draft", "review", "reject"].includes(
+    const recommended = ["auto_queue", "draft", "review", "phone_only", "reject"].includes(
       String(parsed.recommended_action)
     )
       ? (parsed.recommended_action as AutomationLeadScore["recommended_action"])
@@ -135,7 +135,7 @@ export async function scoreLeadForAutomation(
   const { data: lead, error } = await supabase
     .from("leads")
     .select(
-      "id, company_name, email, phone, website, niche, location, company_context, email_source, email_confidence"
+      "id, company_name, email, phone, website, niche, location, company_context, email_source, email_confidence, agent_confidence, agent_risk, agent_recommended_action, agent_email_angle, agent_draft_allowed, agent_auto_send_allowed"
     )
     .eq("id", leadId)
     .eq("user_id", userId)
@@ -151,21 +151,34 @@ export async function scoreLeadForAutomation(
   const system = `You score cold outreach leads for a free v1 assisted automation system.
 Return ONLY JSON with:
 qualified boolean, score integer 0-100, reason string, best_email string|null,
-confidence high|medium|low, risk low|medium|high, recommended_action draft|review|reject.
+confidence high|medium|low, risk low|medium|high, recommended_action auto_queue|draft|review|phone_only|reject.
 Rules:
 - Prefer real business emails and clear company context.
 - Guessed/fallback/low-confidence emails must be review or reject, never high confidence.
 - If no valid email exists, recommend reject unless phone-only review is useful.
+- If agent_auto_send_allowed is false, do not recommend auto_queue.
+- If agent_draft_allowed is false, do not recommend draft.
 - Be conservative for deliverability.`;
 
   const prompt = JSON.stringify(lead, null, 2);
   const raw = await callProvider(provider, system, prompt);
   const score = parseAutomationLeadScore(raw);
+  if (!lead.agent_auto_send_allowed && score.recommended_action === "auto_queue") {
+    score.recommended_action = "draft";
+    score.reason = `${score.reason} Agent safety downgraded auto-queue to draft/review.`;
+  }
+  if (!lead.agent_draft_allowed && ["auto_queue", "draft"].includes(score.recommended_action)) {
+    score.recommended_action = lead.phone ? "phone_only" : "review";
+    score.qualified = false;
+    score.score = Math.min(score.score, 55);
+    score.reason = `${score.reason} Agent evidence does not allow drafting yet.`;
+  }
 
   const reviewRequired =
-    score.recommended_action !== "draft" ||
+    score.recommended_action !== "auto_queue" ||
     score.score < 70 ||
-    score.confidence !== "high";
+    score.confidence !== "high" ||
+    !lead.agent_auto_send_allowed;
 
   await supabase
     .from("leads")

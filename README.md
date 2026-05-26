@@ -1,37 +1,129 @@
-# Outreach Mail Platform
+# Pryro Mail
 
-Lead generation, AI-assisted email writing, and Gmail-based outreach — built with **Next.js**, **Supabase**, and optional **Docker Maps** scraping.
+Local-first lead research, AI-assisted outreach, and Gmail SMTP sending built with **Next.js**, **Supabase**, and a skill-based lead agent.
 
-## Features
+## Current V1
 
-- **Lead scraper** — Google Maps (Docker gosom or Puppeteer), Bing, DuckDuckGo, and directory sources in parallel
-- **Website email discovery** — Crawls contact pages, mailto links, and JS-heavy sites (browser fallback); enriches rows with no Maps website via search + Maps place links
-- **AI email generation** — Uses your provider from **AI Settings** (OpenAI, Anthropic, Groq, Gemini, Mistral)
-- **CRM pipeline** — Leads, campaigns, templates, follow-ups, inbox
-- **Gmail SMTP** — Multiple accounts with daily limits and rotation
+This project is now focused on a safe free-v1 automation flow:
+
+- **Google-first lead agent**: discovers official domains and indexed pages, then fetches targeted pages directly.
+- **Skill registry**: built-in agent skills live in `skills/` with `SKILL.md`, schemas, examples, and read-only UI inspection.
+- **Evidence-first research**: stores typed `businessFacts`, contact points, source URLs, confidence, and skill traces.
+- **AI drafting with Groq first**: email writing uses only ranked typed facts, never raw page text.
+- **Assisted automation**: drafts go to approval before sending.
+- **Gmail SMTP sending**: app-password accounts, caps, rotation, business-hour scheduling, and local worker processing.
+- **Reply/follow-up foundation**: inbox/follow-up routes and IMAP dependency are present for reply-aware automation.
+
+## Architecture
+
+```txt
+Dashboard UI
+  -> Supabase DB/Auth
+  -> automation_jobs queue
+  -> local worker
+  -> lead agent skills
+  -> evidence/contact memory
+  -> Groq draft generation
+  -> approval queue
+  -> Gmail SMTP send
+```
+
+Agent research flow:
+
+```txt
+searchWeb
+  -> fetchTargetedPages
+  -> extractBusinessFacts
+  -> extractContacts
+  -> verifyOwnership
+  -> compileLLMContext
+  -> reasonWithLLM
+  -> decideAction
+```
+
+Email flow:
+
+```txt
+typed businessFacts
+  -> writeEmail
+  -> validate output
+  -> repair once if needed
+  -> reviewEmailSafety
+  -> human approval
+```
+
+The important rule: **raw page text never goes into `writeEmail`**. Only typed, sourced, ranked facts are allowed.
+
+## Skill System
+
+Built-in skills are stored in:
+
+```txt
+skills/
+  searchWeb/
+  fetchTargetedPages/
+  extractBusinessFacts/
+  extractContacts/
+  verifyOwnership/
+  compileLLMContext/
+  reasonWithLLM/
+  decideAction/
+  writeEmail/
+  reviewEmailSafety/
+```
+
+Each skill folder contains:
+
+```txt
+SKILL.md
+references/schema.json
+references/examples.json
+```
+
+The trusted V1 implementation still runs through TypeScript functions in `src/utils`, but skill calls are traced with:
+
+- `skillId`
+- `input`
+- `output`
+- `ok`
+- `confidence`
+- `warnings`
+- `durationMs`
+
+Open **Dashboard -> Skills** to inspect installed skills, rules, schemas, examples, and recent traces.
 
 ## Requirements
 
-- **Node.js** 20+
-- **Supabase** project (URL + anon + service keys)
-- **Chrome/Chromium** — Used by Puppeteer for Maps fallback, website crawl, and optional search retry
-- **Docker** (optional) — For [gosom/google-maps-scraper](https://github.com/gosom/google-maps-scraper) on port 8080
+- Node.js 20+
+- Supabase project
+- Supabase CLI
+- Gmail accounts with app passwords
+- Groq API key configured in **AI Settings**
+- Local PC running the dev server and worker during automation
 
-## Quick start
+Optional:
+
+- Docker Maps scraper (`docker-compose.gmaps.yml`) for legacy/extra discovery paths.
+- Puppeteer browser fallback for blocked pages/search retries.
+
+## Quick Start
 
 ```bash
 npm install
 cp .env.example .env
-# Fill in Supabase keys and any optional keys (see below)
-
-npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) → sign up / sign in → **Dashboard**.
+Fill `.env` with Supabase keys:
 
-### Database
+```env
+NEXT_PUBLIC_SUPABASE_URL=
+NEXT_PUBLIC_SUPABASE_ANON_KEY=
+SUPABASE_SERVICE_KEY=
+CRON_SECRET=
+NEXT_PUBLIC_APP_URL=http://localhost:3003
+```
 
-Apply Supabase migrations (or follow `SETUP_INSTRUCTIONS.md` if tables are missing):
+Link and push database migrations:
 
 ```bash
 npm run supabase:login
@@ -39,94 +131,128 @@ npm run supabase:link
 npm run supabase:push
 ```
 
-## Environment variables
-
-Copy `.env.example` to `.env`. **Required:**
-
-| Variable | Purpose |
-|----------|---------|
-| `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Public anon key |
-| `SUPABASE_SERVICE_KEY` | Server-side service role key |
-
-**Optional but useful:**
-
-| Variable | Purpose |
-|----------|---------|
-| `GOOGLE_KNOWLEDGE_GRAPH_API_KEY` | Company context enrichment (free quota) |
-| `GMAPS_SCRAPER_URL` | e.g. `http://localhost:8080` — Docker Maps scraper |
-| `SEARCH_USE_PUPPETEER=ddg` | Free fix when DuckDuckGo HTML is blocked |
-| AI keys | Configured in the app under **AI Settings** (not only `.env`) |
-
-**Not required:** `BRAVE_SEARCH_API_KEY`, Google Places API, or other paid search keys. The scraper uses free Bing/DDG + browser retry by default.
-
-### Optional Docker Maps
+Run the app:
 
 ```bash
-docker compose -f docker-compose.gmaps.yml up -d
+npm run dev
 ```
 
-```env
-GMAPS_SCRAPER_URL=http://localhost:8080
-GMAPS_SCRAPER_MAX_DEPTH=5
+Run the local worker in a second terminal:
+
+```bash
+npm run worker
 ```
 
-If Docker is offline, Maps automatically falls back to Puppeteer.
+Open the app, sign in, then configure:
 
-### Scraper behavior (summary)
+1. **AI Settings**: add Groq and choose an active model.
+2. **SMTP Manager**: add Gmail SMTP app-password accounts.
+3. **Scraper/Pipeline**: discover leads, re-research, generate drafts, approve, and send.
+4. **Skills**: inspect skill rules and traces.
 
-| Source | Default |
-|--------|---------|
-| Maps | Docker gosom when reachable, else Puppeteer |
-| Bing / DDG | HTTP, then headless browser if blocked |
-| No website in CSV | Maps place link → search → domain guess |
-| Site email | HTTP paths + contact/dealer pages; browser if empty HTML |
+## Environment Variables
 
-Full detail: **[HOW_SCRAPER_WORKS.md](./HOW_SCRAPER_WORKS.md)** (env vars, troubleshooting, email verification).
+Required:
 
-Useful scraper toggles (all default **on** unless set to `false`):
+| Variable | Purpose |
+| --- | --- |
+| `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Browser Supabase anon key |
+| `SUPABASE_SERVICE_KEY` | Server/worker service role key |
+| `CRON_SECRET` | Protects local worker automation routes |
+| `NEXT_PUBLIC_APP_URL` | Local app URL used by the worker |
 
-- `GMAPS_DOCKER_WEBSITE_EMAIL_VERIFY` — Compare gosom CSV email vs website crawl
-- `GMAPS_DOCKER_NO_WEBSITE_ENRICH` — Find website when CSV has none
-- `GMAPS_DOCKER_AI_EMAIL_PICK` — Resolve conflicting emails with AI Settings LLM
-- `WEBSITE_FETCH_PUPPETEER` — Browser retry for JS sites (e.g. corporate contact pages)
-- `GMAPS_MAPS_LINK_WEBSITE` — Read website from Google Maps `link` column
+Useful optional values:
+
+| Variable | Purpose |
+| --- | --- |
+| `AUTOMATION_WORKER_POLL_MS` | Worker polling interval, default `15000` |
+| `SEARCH_PUPPETEER_FALLBACK` | Set `false` to disable search browser fallback |
+| `SEARCH_USE_PUPPETEER` | Force browser search retry, e.g. `google` or `all` |
+| `GMAPS_SCRAPER_URL` | Optional Docker Maps scraper URL |
+
+AI provider API keys are managed in the app under **AI Settings**.
 
 ## Scripts
 
 | Command | Description |
-|---------|-------------|
-| `npm run dev` | Development server |
+| --- | --- |
+| `npm run dev` | Start Next.js development server |
 | `npm run build` | Production build |
-| `npm run start` | Production server |
-| `npm run worker` | Local free-v1 automation worker |
-| `npm run worker:once` | Run one local automation worker pass |
-| `npm run supabase:push` | Push migrations to linked project |
+| `npm run start` | Start production server |
+| `npm run worker` | Start local automation worker |
+| `npm run worker:once` | Run one worker pass |
+| `npm run supabase:push` | Push migrations to linked Supabase project |
+| `npm run supabase:migration:list` | Show linked migration state |
 
-## Project layout
+## Database
 
+Important V1 tables/migrations include:
+
+- `automation_settings`
+- `automation_jobs`
+- `agent_settings`
+- `agent_runs`
+- `lead_evidence`
+- `contact_points`
+- `agent_skill_overrides`
+- `smtp_accounts`
+- `email_queue`
+- `sent_emails`
+- `email_replies`
+- `suppression_list`
+
+Run `npm run supabase:push` after pulling new migrations.
+
+## Safety Defaults
+
+- No low-confidence auto-send.
+- No raw guessed email auto-send.
+- No send outside configured business hours.
+- Per-account and global caps are enforced by the worker/sending flow.
+- Directory/social evidence can support review, but not unsafe auto-send.
+- LLM output is parsed defensively and still goes through validation/safety review.
+- Missing payment model is a warning, not a blocker; missing all usable business facts is a blocker.
+
+## Project Layout
+
+```txt
+src/app/                  Next.js pages and API routes
+src/components/platform/  Dashboard modules
+src/utils/                Agent, skill registry, email, SMTP, worker helpers
+skills/                   Built-in agent skill packages
+scripts/                  Local automation worker and diagnostics
+supabase/migrations/      Database schema changes
+docs/                     Legacy docs and archived notes
 ```
-src/
-  app/              # Next.js routes (auth, dashboard, API)
-  components/       # UI including platform modules (Scraper, CRM, AI Settings)
-  utils/            # Scraper, email, AI helpers
-supabase/migrations/
-docs/legacy-*       # Archived setup/fix notes and one-off SQL
-docker-compose.gmaps.yml
-```
 
-## More documentation
+## Useful Docs
 
 | Doc | Topic |
-|-----|--------|
-| [HOW_SCRAPER_WORKS.md](./HOW_SCRAPER_WORKS.md) | Scraper sources, email quality, `.env` |
-| [SETUP_INSTRUCTIONS.md](./SETUP_INSTRUCTIONS.md) | SMTP tables, Gmail app passwords |
-| [QUICK_START.md](./QUICK_START.md) | Broader platform onboarding |
-| [docs/legacy-docs/README_NEW_FEATURES.md](./docs/legacy-docs/README_NEW_FEATURES.md) | Archived campaigns, templates, follow-ups notes |
+| --- | --- |
+| [HOW_SCRAPER_WORKS.md](./HOW_SCRAPER_WORKS.md) | Legacy scraper details and troubleshooting |
+| [GMAIL_SMTP_README.md](./GMAIL_SMTP_README.md) | Gmail SMTP setup |
+| [SETUP_INSTRUCTIONS.md](./SETUP_INSTRUCTIONS.md) | Older setup notes |
+| [QUICK_START.md](./QUICK_START.md) | Broader app onboarding |
 
 ## Gmail SMTP
 
-Use a **Gmail App Password** (16 characters), not your normal Gmail password. Enable 2FA, then create an app password under Google Account → Security → App passwords. Add accounts in the dashboard **SMTP** section.
+Use a **Gmail App Password**, not your normal Gmail password.
+
+1. Enable 2FA on the Gmail account.
+2. Create an app password in Google Account security settings.
+3. Add the Gmail account in **SMTP Manager**.
+4. Keep daily caps conservative for deliverability.
+
+## Before Pushing
+
+Recommended checks:
+
+```bash
+node .\node_modules\typescript\bin\tsc --noEmit --pretty false
+node .\node_modules\next\dist\bin\next build
+node --check scripts\automation-worker.mjs
+```
 
 ## License
 

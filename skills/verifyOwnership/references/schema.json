@@ -1,0 +1,1 @@
+{"input":{"officialWebsite":"string|null","contacts":"array"},"output":{"verifiedEmails":"number","businessOwnedEmails":"number"}}
