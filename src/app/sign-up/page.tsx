@@ -3,8 +3,7 @@ import { SubmitButton } from "@/components/submit-button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import Link from "next/link";
-import { SmtpMessage } from "../smtp-message";
-import { signUpAction } from "@/app/actions";
+import { signUpAction } from "@/lib/auth-actions";
 import { UrlProvider } from "@/components/url-provider";
 import { Zap } from "lucide-react";
 
@@ -23,14 +22,11 @@ export default async function Signup(props: {
   return (
     <div className="min-h-screen bg-white flex flex-col items-center justify-center px-4">
       <div className="w-full max-w-sm">
-        {/* Logo */}
         <div className="flex items-center justify-center gap-2 mb-8">
           <div className="w-9 h-9 rounded-lg bg-blue-600 flex items-center justify-center">
             <Zap size={17} className="text-white" />
           </div>
-          <span className="text-lg font-bold text-gray-900">
-            OUTREACH
-          </span>
+          <span className="text-lg font-bold text-gray-900">OUTREACH</span>
         </div>
 
         <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
@@ -42,7 +38,9 @@ export default async function Signup(props: {
                 </h1>
                 <p className="text-sm text-gray-600">
                   Already have an account?{" "}
-                  <Link href="/sign-in" className="text-blue-600 hover:underline">Sign in</Link>
+                  <Link href="/sign-in" className="text-blue-600 hover:underline">
+                    Sign in
+                  </Link>
                 </p>
               </div>
 
@@ -104,12 +102,10 @@ export default async function Signup(props: {
           </UrlProvider>
         </div>
 
-        <div className="mt-4">
-          <SmtpMessage />
-        </div>
-
         <p className="text-center mt-4 text-sm">
-          <Link href="/" className="text-gray-600 hover:text-gray-900">← Back to home</Link>
+          <Link href="/" className="text-gray-600 hover:text-gray-900">
+            ← Back to home
+          </Link>
         </p>
       </div>
     </div>

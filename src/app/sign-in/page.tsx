@@ -1,4 +1,4 @@
-import { signInAction } from "@/app/actions";
+import { signInAction } from "@/lib/auth-actions";
 import { FormMessage, Message } from "@/components/form-message";
 import { SubmitButton } from "@/components/submit-button";
 import { Input } from "@/components/ui/input";
@@ -25,7 +25,6 @@ export default async function SignInPage({ searchParams }: LoginProps) {
   return (
     <div className="min-h-screen bg-white flex flex-col items-center justify-center px-4">
       <div className="w-full max-w-sm">
-        {/* Logo */}
         <div className="flex items-center justify-center gap-2 mb-8">
           <div className="w-9 h-9 rounded-lg bg-blue-600 flex items-center justify-center">
             <Zap size={17} className="text-white" />
@@ -38,7 +37,7 @@ export default async function SignInPage({ searchParams }: LoginProps) {
             <div className="text-center">
               <h1 className="text-xl font-bold mb-1 text-gray-900">Welcome back</h1>
               <p className="text-sm text-gray-600">
-                Don't have an account?{" "}
+                Don&apos;t have an account?{" "}
                 <Link href="/sign-up" className="text-blue-600 hover:underline">
                   Sign up free
                 </Link>

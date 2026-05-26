@@ -303,6 +303,8 @@ export default function ScraperModule({
     const totalRef = { current: 0 };
     const lastRunSummary = {
       callListAdded: 0,
+      crmAdded: 0,
+      crmDuplicates: 0,
     };
 
     try {
@@ -413,16 +415,25 @@ export default function ScraperModule({
             } | undefined;
             const callListAdded =
               sum?.callListAdded ?? (payload.crmCallListAdded as number) ?? 0;
+            const crmAdded =
+              sum?.crmAdded ?? (payload.crmAdded as number) ?? 0;
+            const crmDuplicates = (payload.crmDuplicates as number) ?? 0;
             lastRunSummary.callListAdded = callListAdded;
+            lastRunSummary.crmAdded = crmAdded;
+            lastRunSummary.crmDuplicates = crmDuplicates;
             if (sum) {
               setScrapeSummary({
                 withEmail: sum.withEmail ?? (payload.total as number) ?? 0,
                 phoneOnly: sum.phoneOnly ?? (payload.phoneOnlyFound as number) ?? 0,
-                crmAdded: sum.crmAdded ?? (payload.crmAdded as number) ?? 0,
+                crmAdded,
                 callListAdded,
                 researched: sum.researched ?? (payload.crmResearched as number) ?? 0,
                 realEmails: sum.realEmails ?? (payload.realEmails as number) ?? 0,
               });
+            }
+            const savedToCrm = crmAdded + callListAdded;
+            if (savedToCrm > 0) {
+              onLeadsAdded?.(savedToCrm);
             }
           },
           onError: (payload) => {
@@ -444,17 +455,24 @@ export default function ScraperModule({
           : p
       );
 
+      const crmNote =
+        lastRunSummary.crmAdded > 0
+          ? ` · ${lastRunSummary.crmAdded} in CRM`
+          : lastRunSummary.crmDuplicates > 0
+            ? ` · ${lastRunSummary.crmDuplicates} already in CRM`
+            : "";
+
       if (totalRef.current === 0 && !lastRunSummary.callListAdded) {
         toast.info(
           "No leads with real emails found. Try broader niches or different locations."
         );
       } else if (queries.length > 1) {
         toast.success(
-          `Found ${totalRef.current} with email${lastRunSummary.callListAdded ? ` · ${lastRunSummary.callListAdded} call list` : ""} across ${queries.length} searches`
+          `Found ${totalRef.current} with email${lastRunSummary.callListAdded ? ` · ${lastRunSummary.callListAdded} call list` : ""}${crmNote} across ${queries.length} searches`
         );
       } else {
         toast.success(
-          `Found ${totalRef.current} with email${lastRunSummary.callListAdded ? ` · ${lastRunSummary.callListAdded} saved to call list (phone only)` : ""}`
+          `Found ${totalRef.current} with email${lastRunSummary.callListAdded ? ` · ${lastRunSummary.callListAdded} call list` : ""}${crmNote}`
         );
       }
     } catch (e) {
@@ -685,16 +703,31 @@ export default function ScraperModule({
       if (!res.ok) throw new Error(data.error || "Failed to add to CRM");
 
       if (data.added === 0) {
-        toast.info(
-          data.duplicates > 0
-            ? `All ${withEmail.length} lead${withEmail.length !== 1 ? "s" : ""} already exist in your CRM.`
-            : data.message || "No leads were added."
-        );
+        if (data.duplicates > 0) {
+          onLeadsAdded?.(0);
+          toast.info(
+            `All ${withEmail.length} lead${withEmail.length !== 1 ? "s" : ""} already exist in your CRM (same email or company+location).`
+          );
+        } else {
+          toast.info(
+            data.message ||
+              (data.verificationRejected > 0
+                ? `${data.verificationRejected} lead(s) failed email verification`
+                : "No leads were added.")
+          );
+        }
         return;
       }
 
       const realAdded = withEmail.filter((l) => l.emailIsReal).length;
-      let msg = `✅ ${data.added} lead${data.added !== 1 ? "s" : ""} added to CRM`;
+      const savedTotal = (data.added as number) + (data.callListAdded as number);
+      let msg = `✅ ${data.added} with email`;
+      if (data.callListAdded > 0) {
+        msg += ` · ${data.callListAdded} call list (phone)`;
+      }
+      if (data.verificationRejected > 0) {
+        msg += ` · ${data.verificationRejected} guessed email(s) had no mail server`;
+      }
       if (data.duplicates > 0) {
         msg += ` · ${data.duplicates} duplicate${data.duplicates !== 1 ? "s" : ""} skipped`;
       }
@@ -703,7 +736,7 @@ export default function ScraperModule({
       }
       if (withNoEmail.length > 0) msg += ` · ${withNoEmail.length} skipped (no email)`;
       toast.success(msg);
-      onLeadsAdded?.(data.added);
+      onLeadsAdded?.(savedTotal);
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : "Failed to add to CRM";
       toast.error(message);

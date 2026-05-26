@@ -8,6 +8,7 @@ import {
   extractEmailsFromHtml,
   pickFromAggregatedPages,
 } from './business-email-picker';
+import https from 'https';
 
 export interface EmailScrapingResult {
   emails: string[];
@@ -15,6 +16,8 @@ export interface EmailScrapingResult {
   source: string;
   success: boolean;
 }
+
+const unreachableHosts = new Set<string>();
 
 /**
  * Extract email addresses from HTML content
@@ -94,18 +97,25 @@ function findBestEmail(emails: string[]): string | null {
  * Fetch a webpage with proper headers
  */
 export async function fetchWebpage(url: string, timeout: number = 10000): Promise<string | null> {
+  const host = getUrlHost(url);
+  if (host && unreachableHosts.has(host)) {
+    return null;
+  }
+
+  const headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept-Encoding': 'identity',
+    'Connection': 'keep-alive',
+  };
+
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeout);
     
     const response = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive',
-      },
+      headers,
       signal: controller.signal,
     });
     
@@ -118,9 +128,102 @@ export async function fetchWebpage(url: string, timeout: number = 10000): Promis
     
     return await response.text();
   } catch (error) {
-    console.error(`Failed to fetch ${url}:`, error);
+    if (isTlsCertificateError(error) && url.startsWith('https://')) {
+      const html = await fetchWebpageAllowBadCertificate(url, timeout, headers);
+      if (!html) {
+        console.warn(`[Email Scraper] Skipped ${url} (bad SSL certificate)`);
+      }
+      return html;
+    }
+
+    const reason = getFetchFailureReason(error);
+    if (host && reason === 'dns not found') {
+      unreachableHosts.add(host);
+    }
+    console.warn(`[Email Scraper] Skipped ${url} (${reason})`);
     return null;
   }
+}
+
+function getUrlHost(url: string): string | null {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '').toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+function getFetchFailureReason(error: unknown): string {
+  const err = error as {
+    name?: string;
+    code?: string;
+    cause?: { code?: string };
+    message?: string;
+  };
+  const code = err.code || err.cause?.code || '';
+
+  if (err.name === 'AbortError') return 'timeout';
+  if (code === 'ENOTFOUND') return 'dns not found';
+  if (code === 'ECONNREFUSED') return 'connection refused';
+  if (code === 'ECONNRESET') return 'connection reset';
+  if (code === 'ETIMEDOUT') return 'timeout';
+  if (isTlsCertificateError(error)) return 'bad SSL certificate';
+
+  return err.message?.slice(0, 120) || 'fetch failed';
+}
+
+function isTlsCertificateError(error: unknown): boolean {
+  const err = error as { code?: string; cause?: { code?: string }; message?: string };
+  const code = err.code || err.cause?.code || '';
+  return (
+    code === 'DEPTH_ZERO_SELF_SIGNED_CERT' ||
+    code === 'SELF_SIGNED_CERT_IN_CHAIN' ||
+    code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' ||
+    /self-signed certificate|unable to verify/i.test(err.message ?? '')
+  );
+}
+
+function fetchWebpageAllowBadCertificate(
+  url: string,
+  timeout: number,
+  headers: Record<string, string>
+): Promise<string | null> {
+  return new Promise((resolve) => {
+    const req = https.get(
+      url,
+      {
+        headers,
+        timeout,
+        rejectUnauthorized: false,
+      },
+      (res) => {
+        const status = res.statusCode ?? 0;
+        const contentType = String(res.headers['content-type'] ?? '');
+        if (status < 200 || status >= 300 || !contentType.includes('text/html')) {
+          res.resume();
+          resolve(null);
+          return;
+        }
+
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => {
+          body += chunk;
+          if (body.length > 2_000_000) {
+            req.destroy();
+            resolve(body);
+          }
+        });
+        res.on('end', () => resolve(body));
+      }
+    );
+
+    req.on('timeout', () => {
+      req.destroy();
+      resolve(null);
+    });
+    req.on('error', () => resolve(null));
+  });
 }
 
 /**

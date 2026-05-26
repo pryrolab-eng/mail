@@ -42,7 +42,16 @@ export default function PlatformLayout({ userId, userEmail }: PlatformLayoutProp
       .from("leads")
       .select("id", { count: "exact", head: true })
       .eq("user_id", userId)
-      .in("pipeline_stage", ["scraped", "researched", "email_drafted"]);
+      .in("pipeline_stage", [
+        "scraped",
+        "verified",
+        "enriched",
+        "researched",
+        "email_drafted",
+        "approval_pending",
+        "approved",
+        "queued",
+      ]);
 
     if (!error && count != null) {
       setPipelineActionCount(count);
@@ -91,18 +100,17 @@ export default function PlatformLayout({ userId, userEmail }: PlatformLayoutProp
     setPipelineRefreshKey((k) => k + 1);
     fetchPipelineActionCount();
 
-    const n = addedCount && addedCount > 0 ? addedCount : undefined;
-    toast.success(
-      n
-        ? `${n} lead${n === 1 ? "" : "s"} added — open Pipeline to continue`
-        : "Leads added — open Pipeline to continue",
-      {
-        action: {
-          label: "Open Pipeline",
-          onClick: () => handleModuleChange("pipeline"),
-        },
-      }
-    );
+    if (addedCount != null && addedCount > 0) {
+      toast.success(
+        `${addedCount} lead${addedCount === 1 ? "" : "s"} saved — open Pipeline to continue`,
+        {
+          action: {
+            label: "Open Pipeline",
+            onClick: () => handleModuleChange("pipeline"),
+          },
+        }
+      );
+    }
   };
 
   const handleModuleChange = (module: ActiveModule) => {

@@ -47,6 +47,8 @@ type LeadRow = {
   company_context: string | null;
   pipeline_stage: string | null;
   notes: string | null;
+  automation_score?: number | null;
+  automation_fit_reason?: string | null;
 };
 
 async function callPipelineAI(
@@ -204,7 +206,7 @@ export async function runGenerateEmailForLead(
   const { data: lead, error: loadError } = await supabase
     .from("leads")
     .select(
-      "id, user_id, company_name, email, niche, location, company_context, pipeline_stage, notes"
+      "id, user_id, company_name, email, niche, location, company_context, pipeline_stage, notes, automation_score, automation_fit_reason"
     )
     .eq("id", leadId)
     .eq("user_id", userId)
@@ -338,6 +340,10 @@ export async function runGenerateEmailForLead(
         body,
         tone: "Direct",
         model_used: modelLabel,
+        approval_status: "pending",
+        quality_score: quality.score,
+        ai_score: row.automation_score ?? null,
+        ai_score_reason: row.automation_fit_reason ?? null,
       })
       .select("id")
       .single();
@@ -350,7 +356,7 @@ export async function runGenerateEmailForLead(
     const { error: updateError } = await supabase
       .from("leads")
       .update({
-        pipeline_stage: "email_drafted",
+        pipeline_stage: "approval_pending",
         pipeline_updated_at: now,
         pipeline_error: null,
         updated_at: now,
@@ -363,7 +369,7 @@ export async function runGenerateEmailForLead(
     return {
       success: true,
       leadId,
-      pipeline_stage: "email_drafted",
+      pipeline_stage: "approval_pending",
       emailId: saved?.id,
       subject,
       body,

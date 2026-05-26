@@ -37,20 +37,34 @@ export const LEAD_STATUSES: { value: LeadStatus; label: string; color: string; b
 
 export type PipelineStage =
   | 'scraped'
+  | 'verified'
+  | 'enriched'
   | 'call_list'
   | 'researched'
   | 'email_drafted'
+  | 'approval_pending'
+  | 'approved'
+  | 'queued'
   | 'sent'
   | 'replied'
+  | 'followup_due'
+  | 'completed'
   | 'failed';
 
 export const PIPELINE_STAGES: PipelineStage[] = [
   'scraped',
+  'verified',
+  'enriched',
   'call_list',
   'researched',
   'email_drafted',
+  'approval_pending',
+  'approved',
+  'queued',
   'sent',
   'replied',
+  'followup_due',
+  'completed',
   'failed',
 ];
 
@@ -79,6 +93,13 @@ export interface Lead {
   pipeline_error?: string | null;
   email_source?: string | null;
   email_confidence?: string | null;
+  automation_score?: number | null;
+  automation_fit_reason?: string | null;
+  automation_risk?: string | null;
+  automation_recommended_action?: string | null;
+  automation_review_required?: boolean | null;
+  automation_last_scored_at?: string | null;
+  automation_rejected_reason?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -119,6 +140,14 @@ export interface GeneratedEmail {
   body: string | null;
   tone: string | null;
   model_used: string | null;
+  approval_status?: 'draft' | 'pending' | 'approved' | 'rejected' | 'sent' | null;
+  approved_at?: string | null;
+  approved_by?: string | null;
+  rejected_at?: string | null;
+  rejection_reason?: string | null;
+  quality_score?: number | null;
+  ai_score?: number | null;
+  ai_score_reason?: string | null;
   created_at: string;
 }
 

@@ -50,14 +50,17 @@ export async function findExistingLeadKeys(
   companyLocations: Set<string>;
   phoneOnlyKeys: Set<string>;
 }> {
-  const emails = new Set(
-    leads.map((l) => l.email?.trim().toLowerCase()).filter(Boolean) as string[]
-  );
-  const companyLocations = new Set(
-    leads.map((l) => companyLocationKey(l.company_name, l.location))
-  );
+  // Only keys already in the DB — never seed from `leads` or every import is a false duplicate.
+  const emails = new Set<string>();
+  const companyLocations = new Set<string>();
 
-  const emailList = Array.from(emails);
+  const emailList = Array.from(
+    new Set(
+      leads
+        .map((l) => l.email?.trim().toLowerCase())
+        .filter(Boolean) as string[]
+    )
+  );
   const { data: byEmail } = emailList.length
     ? await supabase
         .from("leads")
@@ -240,6 +243,7 @@ export async function insertScrapedLeadsToCrm(
   }
 
   let verificationRejected = 0;
+  const verifyFallbackCallList: ScrapedLead[] = [];
   const verifiedLeads: Array<{
     lead: (typeof newLeads)[0];
     verification: Awaited<ReturnType<typeof verifyEmail>>;
@@ -258,10 +262,45 @@ export async function insertScrapedLeadsToCrm(
       console.log(
         `  ⛔ Email verify skip: ${l.email} (${check.reason}) — ${l.company_name}`
       );
+      if (check.reason === "no_mx" && (l.phone?.replace(/\D/g, "") ?? "").length >= 6) {
+        const phoneLead = finalizePhoneOnlyScrapeLead(
+          { ...l, email: "", phoneOnly: true },
+          searchLocation
+        );
+        if (
+          phoneLead &&
+          !isJunkScrapeLead(
+            {
+              company_name: phoneLead.company_name,
+              phone: phoneLead.phone,
+              website: phoneLead.website,
+              business_address: phoneLead.business_address,
+              source_snippet: phoneLead.source_snippet,
+              location: phoneLead.location,
+              phoneOnly: true,
+            },
+            searchLocation
+          ) &&
+          !isDuplicateScrapeLead(
+            { ...phoneLead, phoneOnly: true },
+            existing
+          )
+        ) {
+          verifyFallbackCallList.push(phoneLead);
+          existing.phoneOnlyKeys.add(
+            phoneOnlyKey(phoneLead.company_name, phoneLead.phone)
+          );
+          console.log(
+            `  📞 ${l.company_name} → call list (email ${check.reason}, keeping phone)`
+          );
+        }
+      }
       continue;
     }
     verifiedLeads.push({ lead: l, verification: check });
   }
+
+  const allPhoneLeads = [...newPhoneLeads, ...verifyFallbackCallList];
 
   const now = new Date().toISOString();
   const emailInserts =
@@ -294,7 +333,7 @@ export async function insertScrapedLeadsToCrm(
         })
       : [];
 
-  const phoneInserts = newPhoneLeads.map((l) => ({
+  const phoneInserts = allPhoneLeads.map((l) => ({
     user_id: userId,
     company_name: l.company_name.trim(),
     email: null,
@@ -340,7 +379,7 @@ export async function insertScrapedLeadsToCrm(
 
   return {
     added: verifiedLeads.length,
-    callListAdded: newPhoneLeads.length,
+    callListAdded: allPhoneLeads.length,
     duplicates,
     skipped,
     junkFiltered,

@@ -99,6 +99,8 @@ Useful scraper toggles (all default **on** unless set to `false`):
 | `npm run dev` | Development server |
 | `npm run build` | Production build |
 | `npm run start` | Production server |
+| `npm run worker` | Local free-v1 automation worker |
+| `npm run worker:once` | Run one local automation worker pass |
 | `npm run supabase:push` | Push migrations to linked project |
 
 ## Project layout
@@ -109,7 +111,7 @@ src/
   components/       # UI including platform modules (Scraper, CRM, AI Settings)
   utils/            # Scraper, email, AI helpers
 supabase/migrations/
-gmapsdata/          # Docker Maps job CSV output
+docs/legacy-*       # Archived setup/fix notes and one-off SQL
 docker-compose.gmaps.yml
 ```
 
@@ -119,8 +121,8 @@ docker-compose.gmaps.yml
 |-----|--------|
 | [HOW_SCRAPER_WORKS.md](./HOW_SCRAPER_WORKS.md) | Scraper sources, email quality, `.env` |
 | [SETUP_INSTRUCTIONS.md](./SETUP_INSTRUCTIONS.md) | SMTP tables, Gmail app passwords |
-| [QUICK_START_GUIDE.md](./QUICK_START_GUIDE.md) | Broader platform onboarding |
-| [README_NEW_FEATURES.md](./README_NEW_FEATURES.md) | Campaigns, templates, follow-ups |
+| [QUICK_START.md](./QUICK_START.md) | Broader platform onboarding |
+| [docs/legacy-docs/README_NEW_FEATURES.md](./docs/legacy-docs/README_NEW_FEATURES.md) | Archived campaigns, templates, follow-ups notes |
 
 ## Gmail SMTP
 

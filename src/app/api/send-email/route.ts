@@ -4,6 +4,7 @@ import { createServiceClient } from "../../../../supabase/service";
 import { SMTPManager } from "@/utils/smtp-server";
 import { randomUUID } from "crypto";
 import { classifyBounce } from "@/types/platform";
+import { z } from "zod";
 
 export const runtime = "nodejs";
 
@@ -62,6 +63,14 @@ export interface SendEmailResponse {
   warning?: string;
 }
 
+const sendEmailSchema = z.object({
+  leadId: z.string().uuid().optional(),
+  to: z.string().email(),
+  subject: z.string().min(1).max(300),
+  body: z.string().min(1),
+  campaignId: z.string().uuid().optional(),
+});
+
 /** Save a record to sent_emails using service role (bypasses RLS) */
 async function logEmail(
   service: ReturnType<typeof createServiceClient>,
@@ -115,24 +124,28 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 });
     }
 
-    const body = (await request.json()) as SendEmailRequest;
-    const { leadId, to, subject, body: emailBody, campaignId } = body;
-
-    if (!to || !subject || !emailBody) {
+    const parsed = sendEmailSchema.safeParse(await request.json().catch(() => ({})));
+    if (!parsed.success) {
       return NextResponse.json(
-        { success: false, error: "Missing required fields: to, subject, body" },
+        { success: false, error: parsed.error.issues[0]?.message ?? "Invalid request" },
         { status: 400 }
       );
     }
-
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
-      return NextResponse.json(
-        { success: false, error: "Invalid recipient email address" },
-        { status: 400 }
-      );
-    }
+    const { leadId, to, subject, body: emailBody, campaignId } = parsed.data;
 
     const service = createServiceClient();
+
+    const { count: suppressed } = await service
+      .from("email_suppression_list")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", user.id)
+      .eq("email", to.toLowerCase());
+    if ((suppressed ?? 0) > 0) {
+      return NextResponse.json(
+        { success: false, error: "Recipient is on the suppression list" },
+        { status: 400 }
+      );
+    }
 
     // Look up lead
     let lead: { id: string; company_name: string; status: string } | null = null;

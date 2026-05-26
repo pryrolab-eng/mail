@@ -20,6 +20,8 @@ import {
   CheckSquare,
   Square,
   Trash2,
+  ShieldCheck,
+  ThumbsDown,
 } from "lucide-react";
 import { createClient } from "../../../supabase/client";
 import { toast } from "sonner";
@@ -47,10 +49,17 @@ const STAGE_BADGE: Record<
   { label: string; className: string }
 > = {
   scraped: { label: "Scraped", className: "bg-slate-100 text-slate-700 border-slate-200" },
+  verified: { label: "Verified", className: "bg-cyan-50 text-cyan-700 border-cyan-200" },
+  enriched: { label: "Enriched", className: "bg-blue-50 text-blue-700 border-blue-200" },
   researched: { label: "Researched", className: "bg-blue-50 text-blue-700 border-blue-200" },
   email_drafted: { label: "Drafted", className: "bg-violet-50 text-violet-700 border-violet-200" },
+  approval_pending: { label: "Review", className: "bg-amber-50 text-amber-800 border-amber-200" },
+  approved: { label: "Approved", className: "bg-green-50 text-green-700 border-green-200" },
+  queued: { label: "Queued", className: "bg-indigo-50 text-indigo-700 border-indigo-200" },
   sent: { label: "Sent", className: "bg-green-50 text-green-700 border-green-200" },
   replied: { label: "Replied", className: "bg-emerald-50 text-emerald-800 border-emerald-200" },
+  followup_due: { label: "Follow-up", className: "bg-orange-50 text-orange-700 border-orange-200" },
+  completed: { label: "Done", className: "bg-gray-100 text-gray-700 border-gray-200" },
   failed: { label: "Failed", className: "bg-red-50 text-red-700 border-red-200" },
   call_list: { label: "Call list", className: "bg-amber-50 text-amber-800 border-amber-200" },
 };
@@ -59,6 +68,10 @@ type LeadRow = Lead & {
   pipeline_stage?: PipelineStage | null;
   pipeline_error?: string | null;
   pipeline_updated_at?: string | null;
+  automation_score?: number | null;
+  automation_fit_reason?: string | null;
+  automation_risk?: string | null;
+  automation_recommended_action?: string | null;
 };
 
 const PIPELINE_COLUMNS: {
@@ -70,7 +83,7 @@ const PIPELINE_COLUMNS: {
   {
     key: "scraped",
     label: "Scraped",
-    stages: ["scraped"],
+    stages: ["scraped", "verified", "enriched"],
     hint: "Run research to enrich context",
   },
   {
@@ -87,14 +100,14 @@ const PIPELINE_COLUMNS: {
   },
   {
     key: "email_drafted",
-    label: "Email Drafted",
-    stages: ["email_drafted"],
-    hint: "Review draft and send via SMTP",
+    label: "Needs Review",
+    stages: ["email_drafted", "approval_pending", "approved", "queued"],
+    hint: "Batch approve before Gmail sends",
   },
   {
     key: "sent_group",
     label: "Sent",
-    stages: ["sent", "replied"],
+    stages: ["sent", "replied", "followup_due", "completed"],
     hint: "Email delivered — awaiting reply",
   },
   {
@@ -136,6 +149,7 @@ export default function PipelineModule({
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [selectedLeadIds, setSelectedLeadIds] = useState<Set<string>>(new Set());
   const [isDeleting, setIsDeleting] = useState(false);
+  const [approvalBusy, setApprovalBusy] = useState(false);
 
   const supabase = createClient();
 
@@ -200,11 +214,91 @@ export default function PipelineModule({
     }
   };
 
+  const approveSelectedLeads = async () => {
+    const ids = Array.from(selectedLeadIds);
+    if (ids.length === 0) return;
+
+    setApprovalBusy(true);
+    try {
+      const res = await fetch("/api/automation/approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "approve", leadIds: ids }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data.error ?? "Approval failed");
+        return;
+      }
+      toast.success(`Approved ${data.approved ?? 0}, queued ${data.queued ?? 0}`);
+      if (data.errors?.length) toast.warning(`${data.errors.length} skipped`);
+      setSelectedLeadIds(new Set());
+      await fetchPipeline();
+      onPipelineChange?.();
+    } finally {
+      setApprovalBusy(false);
+    }
+  };
+
+  const rejectSelectedLeads = async () => {
+    const ids = Array.from(selectedLeadIds);
+    if (ids.length === 0) return;
+
+    setApprovalBusy(true);
+    try {
+      const res = await fetch("/api/automation/approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "reject",
+          leadIds: ids,
+          reason: "Rejected during batch review",
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data.error ?? "Reject failed");
+        return;
+      }
+      toast.success(`Rejected ${data.rejected ?? 0}`);
+      setSelectedLeadIds(new Set());
+      await fetchPipeline();
+      onPipelineChange?.();
+    } finally {
+      setApprovalBusy(false);
+    }
+  };
+
+  const scoreSelectedLeads = async () => {
+    const ids = Array.from(selectedLeadIds);
+    if (ids.length === 0) return;
+
+    setApprovalBusy(true);
+    try {
+      const res = await fetch("/api/automation/score", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ leadIds: ids }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data.error ?? "Scoring failed");
+        return;
+      }
+      toast.success(`AI scored ${data.scored ?? 0} lead${data.scored === 1 ? "" : "s"}`);
+      if (data.failed) toast.warning(`${data.failed} failed to score`);
+      await fetchPipeline();
+      onPipelineChange?.();
+    } finally {
+      setApprovalBusy(false);
+    }
+  };
+
   const fetchPipeline = useCallback(async () => {
     const { data: leadData, error: leadError } = await supabase
       .from("leads")
       .select(
-        "id, user_id, company_name, email, phone, website, niche, location, company_context, status, notes, pipeline_stage, pipeline_error, pipeline_updated_at, email_source, email_confidence, created_at, updated_at"
+        "id, user_id, company_name, email, phone, website, niche, location, company_context, status, notes, pipeline_stage, pipeline_error, pipeline_updated_at, email_source, email_confidence, automation_score, automation_fit_reason, automation_risk, automation_recommended_action, created_at, updated_at"
       )
       .eq("user_id", userId)
       .not("pipeline_stage", "is", null)
@@ -335,7 +429,7 @@ export default function PipelineModule({
         const updated = (await supabase
           .from("leads")
           .select(
-            "id, user_id, company_name, email, phone, website, niche, location, company_context, status, notes, pipeline_stage, pipeline_error, pipeline_updated_at, email_source, email_confidence, created_at, updated_at"
+            "id, user_id, company_name, email, phone, website, niche, location, company_context, status, notes, pipeline_stage, pipeline_error, pipeline_updated_at, email_source, email_confidence, automation_score, automation_fit_reason, automation_risk, automation_recommended_action, created_at, updated_at"
           )
           .eq("id", leadId)
           .single()).data as LeadRow | null;
@@ -406,8 +500,16 @@ export default function PipelineModule({
     scraped: leads.filter((l) => normalizePipelineStage(l.pipeline_stage) === "scraped").length,
     callList: leads.filter((l) => l.pipeline_stage === "call_list").length,
     researched: leads.filter((l) => l.pipeline_stage === "researched").length,
-    drafted: leads.filter((l) => l.pipeline_stage === "email_drafted").length,
-    sent: leads.filter((l) => l.pipeline_stage === "sent" || l.pipeline_stage === "replied").length,
+    drafted: leads.filter((l) =>
+      ["email_drafted", "approval_pending", "approved", "queued"].includes(
+        l.pipeline_stage ?? ""
+      )
+    ).length,
+    sent: leads.filter((l) =>
+      ["sent", "replied", "followup_due", "completed"].includes(
+        l.pipeline_stage ?? ""
+      )
+    ).length,
     failed: leads.filter((l) => l.pipeline_stage === "failed").length,
   };
 
@@ -481,6 +583,41 @@ export default function PipelineModule({
           </button>
           <button
             type="button"
+            disabled={approvalBusy}
+            onClick={scoreSelectedLeads}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
+          >
+            {approvalBusy ? (
+              <Loader2 size={12} className="animate-spin" />
+            ) : (
+              <Sparkles size={12} />
+            )}
+            AI score
+          </button>
+          <button
+            type="button"
+            disabled={approvalBusy}
+            onClick={approveSelectedLeads}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-green-600 text-white hover:bg-green-700 disabled:opacity-50"
+          >
+            {approvalBusy ? (
+              <Loader2 size={12} className="animate-spin" />
+            ) : (
+              <ShieldCheck size={12} />
+            )}
+            Approve & queue
+          </button>
+          <button
+            type="button"
+            disabled={approvalBusy}
+            onClick={rejectSelectedLeads}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-gray-800 text-white hover:bg-gray-900 disabled:opacity-50"
+          >
+            <ThumbsDown size={12} />
+            Reject
+          </button>
+          <button
+            type="button"
             onClick={() => setSelectedLeadIds(new Set())}
             className="text-xs text-gray-600 hover:text-gray-900 underline"
           >
@@ -491,7 +628,7 @@ export default function PipelineModule({
 
       <p className="px-5 py-2 text-[11px] text-gray-500 border-b border-gray-100 bg-gray-50">
         Click a card for details, or use the checkbox to select leads for bulk delete.
-        Use <strong>Re-research</strong> to refresh context — no drag-and-drop needed.
+        Assisted mode is on: drafts require batch approval before Gmail sending.
       </p>
 
       {/* Kanban */}
@@ -624,12 +761,28 @@ export default function PipelineModule({
                     {new Date(drawerLead.pipeline_updated_at).toLocaleString()}
                   </span>
                 )}
+                {drawerLead.automation_score != null && (
+                  <span className="text-[10px] px-2 py-0.5 rounded bg-green-50 text-green-700 border border-green-200 font-semibold">
+                    AI score {drawerLead.automation_score}
+                  </span>
+                )}
               </div>
 
               {drawerLead.pipeline_error && (
                 <div className="flex gap-2 p-3 rounded-lg bg-red-50 border border-red-200 text-xs text-red-800">
                   <AlertCircle size={14} className="flex-shrink-0 mt-0.5" />
                   <p>{drawerLead.pipeline_error}</p>
+                </div>
+              )}
+
+              {drawerLead.automation_fit_reason && (
+                <div>
+                  <p className="text-[10px] uppercase tracking-widest text-gray-400 font-semibold mb-1.5">
+                    AI decision
+                  </p>
+                  <p className="text-xs text-gray-700 leading-relaxed bg-green-50 border border-green-200 rounded-lg p-3">
+                    {drawerLead.automation_fit_reason}
+                  </p>
                 </div>
               )}
 
@@ -672,7 +825,9 @@ export default function PipelineModule({
                   Retry enrich (find email)
                 </button>
               )}
-              {drawerLead.pipeline_stage === "scraped" && (
+              {["scraped", "verified", "enriched"].includes(
+                drawerLead.pipeline_stage ?? "scraped"
+              ) && (
                 <button
                   disabled={busyLeadId === drawerLead.id}
                   onClick={() => runAction(drawerLead.id, "research")}
@@ -687,7 +842,9 @@ export default function PipelineModule({
                 </button>
               )}
               {drawerLead.pipeline_stage &&
-                drawerLead.pipeline_stage !== "scraped" && (
+                !["scraped", "verified", "enriched"].includes(
+                  drawerLead.pipeline_stage
+                ) && (
                   <button
                     disabled={busyLeadId === drawerLead.id}
                     onClick={() => runAction(drawerLead.id, "research")}
@@ -701,10 +858,10 @@ export default function PipelineModule({
                     Re-research
                   </button>
                 )}
-              {drawerLead.pipeline_stage === "email_drafted" && (
+              {(drawerLead.pipeline_stage === "email_drafted" ||
+                drawerLead.pipeline_stage === "approval_pending") && (
                 <p className="w-full text-[10px] text-gray-500 order-first">
-                  Re-research refreshes company context and moves this lead back to
-                  Researched — generate a new email afterward.
+                  This draft is waiting for assisted-mode approval. Select it and use Approve & queue.
                 </p>
               )}
               {(drawerLead.pipeline_stage === "researched" ||
@@ -722,20 +879,17 @@ export default function PipelineModule({
                   Generate email
                 </button>
               )}
-              {drawerLead.pipeline_stage === "email_drafted" && drawerDraft && (
+              {drawerLead.pipeline_stage === "approval_pending" && drawerDraft && (
                 <button
                   disabled={!drawerLead.email}
-                  onClick={() =>
-                    openSendPreview(drawerLead, {
-                      id: drawerDraft.id,
-                      subject: drawerDraft.subject,
-                      body: drawerDraft.body,
-                    })
-                  }
+                  onClick={() => {
+                    setSelectedLeadIds(new Set([drawerLead.id]));
+                    toast.info("Lead selected. Use Approve & queue in the selection bar.");
+                  }}
                   className="flex-1 min-w-[120px] flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-semibold bg-green-600 text-white hover:bg-green-700 disabled:opacity-50"
                 >
-                  <Send size={14} />
-                  Review &amp; send
+                  <ShieldCheck size={14} />
+                  Select for approval
                 </button>
               )}
               {(drawerLead.pipeline_stage === "sent" ||
@@ -748,7 +902,7 @@ export default function PipelineModule({
                     </p>
                   </div>
                 )}
-              {!drawerLead.email && drawerLead.pipeline_stage === "email_drafted" && (
+              {!drawerLead.email && drawerLead.pipeline_stage === "approval_pending" && (
                 <p className="w-full text-[10px] text-amber-700">Add an email address to send.</p>
               )}
               <button
@@ -957,7 +1111,7 @@ function PipelineCard({
         className="flex flex-wrap gap-1 mt-2"
         onClick={(e) => e.stopPropagation()}
       >
-        {stage === "scraped" && (
+        {["scraped", "verified", "enriched"].includes(stage) && (
           <ActionBtn
             icon={Search}
             label="Research"
@@ -986,10 +1140,10 @@ function PipelineCard({
         {stage === "email_drafted" && (
           <>
             <ActionBtn
-              icon={Send}
-              label="Review & send"
-              busy={busy && busyAction === "send"}
-              onClick={onReviewSend}
+              icon={ShieldCheck}
+              label="Select to approve"
+              busy={false}
+              onClick={onToggleSelect}
               variant="green"
             />
             <ActionBtn
@@ -1000,6 +1154,33 @@ function PipelineCard({
               variant="outline"
             />
           </>
+        )}
+        {stage === "approval_pending" && (
+          <>
+            <ActionBtn
+              icon={ShieldCheck}
+              label="Select"
+              busy={false}
+              onClick={onToggleSelect}
+              variant="green"
+            />
+            <ActionBtn
+              icon={RefreshCw}
+              label="Re-research"
+              busy={busy && busyAction === "research"}
+              onClick={onResearch}
+              variant="outline"
+            />
+          </>
+        )}
+        {stage === "queued" && (
+          <ActionBtn
+            icon={Mail}
+            label="Queued"
+            busy={false}
+            onClick={onViewSent}
+            variant="blue"
+          />
         )}
         {stage === "failed" && (
           <ActionBtn

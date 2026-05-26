@@ -3,9 +3,7 @@ import { SubmitButton } from "@/components/submit-button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import Link from "next/link";
-import { SmtpMessage } from "../smtp-message";
-import { forgotPasswordAction } from "@/app/actions";
-import Navbar from "@/components/navbar";
+import { forgotPasswordAction } from "@/lib/auth-actions";
 import { UrlProvider } from "@/components/url-provider";
 import { Mail, ArrowLeft } from "lucide-react";
 
@@ -23,24 +21,21 @@ export default async function ForgotPassword(props: {
   }
 
   return (
-    <>
-      <Navbar />
-      <div className="flex min-h-screen flex-col items-center justify-center bg-background px-4 py-8">
+    <div className="flex min-h-screen flex-col items-center justify-center bg-background px-4 py-8">
         <div className="w-full max-w-md rounded-2xl border border-border bg-card p-8 shadow-lg">
           <UrlProvider>
             <form className="flex flex-col space-y-6">
-              {/* Header */}
               <div className="space-y-3 text-center">
                 <div className="mx-auto w-12 h-12 rounded-full bg-blue-100 flex items-center justify-center">
                   <Mail size={20} className="text-blue-600" />
                 </div>
                 <h1 className="text-2xl font-bold tracking-tight">Reset Your Password</h1>
                 <p className="text-sm text-muted-foreground">
-                  Enter your email address and we'll send you a link to reset your password.
+                  Enter your email address and we&apos;ll send you a link to reset your
+                  password.
                 </p>
               </div>
 
-              {/* Email input */}
               <div className="space-y-2">
                 <Label htmlFor="email" className="text-sm font-semibold" style={{ color: "#333" }}>
                   EMAIL ADDRESS
@@ -55,7 +50,6 @@ export default async function ForgotPassword(props: {
                 />
               </div>
 
-              {/* Submit button */}
               <SubmitButton
                 formAction={forgotPasswordAction}
                 pendingText="Sending reset link..."
@@ -66,7 +60,6 @@ export default async function ForgotPassword(props: {
 
               <FormMessage message={searchParams} />
 
-              {/* Back to sign in */}
               <div className="text-center">
                 <Link
                   href="/sign-in"
@@ -79,8 +72,6 @@ export default async function ForgotPassword(props: {
             </form>
           </UrlProvider>
         </div>
-        <SmtpMessage />
       </div>
-    </>
   );
 }

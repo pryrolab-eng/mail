@@ -155,7 +155,17 @@ async function processFollowupsForUser(
       // ── Guard: stop if lead replied / is in a terminal status ─────────────
       if (
         due.stop_on_reply &&
-        ["Replied", "Interested", "Closed", "Dead"].includes(due.lead_status)
+        [
+          "Replied",
+          "Interested",
+          "Closed",
+          "Dead",
+          "replied",
+          "interested",
+          "bounced",
+          "failed",
+          "completed",
+        ].includes(due.lead_status)
       ) {
         await stopSequence(service, due.sent_email_id, "lead_replied_or_closed");
         result.skipped++;

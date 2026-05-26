@@ -337,8 +337,26 @@ async function processInbox(
       if (leadId) {
         await service
           .from("leads")
-          .update({ status: "replied", updated_at: new Date().toISOString() })
+          .update({
+            status: "replied",
+            pipeline_stage: "replied",
+            pipeline_updated_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          })
           .eq("id", leadId);
+      }
+
+      if (["not_interested", "negative"].includes(sentiment)) {
+        await service.from("email_suppression_list").upsert(
+          {
+            user_id: config.user_id,
+            email: senderEmail,
+            reason: sentiment === "not_interested" ? "not_interested" : "negative_reply",
+            source: "inbox_check",
+            lead_id: leadId,
+          },
+          { onConflict: "user_id,email" }
+        );
       }
 
       result.newReplies++;

@@ -72,6 +72,13 @@ export async function POST(req: NextRequest) {
       });
     }
 
+    if (result.added === 0 && result.verificationRejected > 0 && result.duplicates === 0) {
+      return NextResponse.json({
+        ...result,
+        message: `${result.verificationRejected} lead(s) rejected by email verification`,
+      });
+    }
+
     return NextResponse.json({
       ...result,
       message:

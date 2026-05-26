@@ -1,7 +1,7 @@
 ﻿import puppeteer, { Browser } from 'puppeteer';
 
 import { buildEnrichedLeadContext } from './lead-context-builder';
-import { guessAndVerifyEmails, inferDomainsFromName } from './email-guesser';
+import { guessAndVerifyEmails } from './email-guesser';
 import {
   finalizeScrapedLead,
   finalizePhoneOnlyScrapeLead,
@@ -545,6 +545,154 @@ async function fetchEmailFromSite(
   return pick?.bestEmail ?? null;
 }
 
+const DIRECTORY_WEBSITE_HOSTS = [
+  'africabizinfo.com',
+  'rwandayp.com',
+  'yellowpages.com',
+  'medpages.info',
+  'zoea.africa',
+  'cybo.com',
+  'yelp.com',
+  'facebook.com',
+  'instagram.com',
+  'linkedin.com',
+  'google.com',
+  'maps.google',
+  'zoominfo.com',
+  'rocketreach.co',
+  'apollo.io',
+];
+
+function normalizeSearchText(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+
+function companySearchTokens(companyName: string): string[] {
+  return normalizeSearchText(companyName)
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length >= 4)
+    .filter(
+      (token) =>
+        ![
+          'ltd',
+          'limited',
+          'company',
+          'business',
+          'official',
+          'website',
+          'contact',
+          'rwanda',
+          'kigali',
+        ].includes(token)
+    )
+    .slice(0, 5);
+}
+
+function candidateHost(url: string): string | null {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '').toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+function isDirectoryOrPlatformUrl(url: string): boolean {
+  const host = candidateHost(url);
+  if (!host) return true;
+  return DIRECTORY_WEBSITE_HOSTS.some(
+    (blocked) => host === blocked || host.endsWith(`.${blocked}`)
+  );
+}
+
+function isLikelyOfficialWebsiteHit(
+  hit: { title: string; url: string; snippet: string },
+  companyName: string,
+  location: string
+): boolean {
+  if (!hit.url || !/^https?:\/\//i.test(hit.url)) return false;
+  if (/\.(pdf|docx?|xlsx?)(\?|$)/i.test(hit.url)) return false;
+  if (isDirectoryOrPlatformUrl(hit.url)) return false;
+
+  const host = normalizeSearchText(candidateHost(hit.url) ?? '');
+  const blob = normalizeSearchText(`${hit.title} ${hit.snippet} ${hit.url}`);
+  const tokens = companySearchTokens(companyName);
+  const tokenHits = tokens.filter(
+    (token) => blob.includes(token) || host.includes(token)
+  ).length;
+  const locationHint = /rwanda|kigali/i.test(location)
+    ? /rwanda|kigali|\.rw\b/i.test(`${hit.title} ${hit.snippet} ${hit.url}`)
+    : true;
+
+  return tokenHits >= Math.min(2, Math.max(1, tokens.length)) && locationHint;
+}
+
+async function discoverOfficialWebsite(
+  companyName: string,
+  location: string
+): Promise<string | null> {
+  const city = location.split(',')[0]?.trim() || location;
+  const queries = [
+    `"${companyName}" "${city}" official website`,
+    `"${companyName}" Rwanda contact website`,
+    `${companyName} ${city} Rwanda website -facebook -linkedin`,
+  ];
+  const seen = new Set<string>();
+
+  try {
+    const {
+      fetchBingHtml,
+      fetchDdgHtml,
+      parseBingHits,
+      parseDdgHits,
+    } = await import('./search-engine-fetch');
+    const { fetchWebpage } = await import('./website-email-scraper');
+
+    for (const query of queries) {
+      const hits: Array<{ title: string; url: string; snippet: string }> = [];
+
+      try {
+        const bing = await fetchBingHtml(query, location);
+        hits.push(...parseBingHits(bing.html, 10));
+      } catch {
+        /* try DDG */
+      }
+
+      try {
+        const ddg = await fetchDdgHtml(query);
+        hits.push(...parseDdgHits(ddg.html, ddg.via).slice(0, 10));
+      } catch {
+        /* no search hits */
+      }
+
+      for (const hit of hits) {
+        const host = candidateHost(hit.url);
+        if (!host || seen.has(host)) continue;
+        seen.add(host);
+        if (!isLikelyOfficialWebsiteHit(hit, companyName, location)) continue;
+
+        const origin = new URL(hit.url).origin;
+        const html = await fetchWebpage(origin, 8_000);
+        if (!html) continue;
+        const text = normalizeSearchText(html.replace(/<[^>]+>/g, ' '));
+        const tokenHits = companySearchTokens(companyName).filter((token) =>
+          text.includes(token)
+        ).length;
+        if (tokenHits >= 1) {
+          console.log(`  🔎 Official site found by search: ${origin}`);
+          return origin;
+        }
+      }
+    }
+  } catch {
+    /* discovery is best-effort */
+  }
+
+  return null;
+}
+
 // ─── HTTP helper ──────────────────────────────────────────────────────────────
 
 async function httpGet(url: string): Promise<string> {
@@ -814,7 +962,13 @@ async function scrapeGoogleMapsMultiQuery(
     }
   }
 
-  const maxPerQuery = Math.max(1, Math.ceil(mapsTarget / locationQueries.length));
+  // We need more Maps candidates than the final target because many local sites
+  // have no email, broken DNS, bad SSL, or only guessed addresses that get blocked.
+  const mapsCandidateTarget = Math.ceil(mapsTarget * 2.5);
+  const maxPerQuery = Math.min(
+    80,
+    Math.max(8, Math.ceil(mapsCandidateTarget / locationQueries.length))
+  );
   const collected: ScrapedLead[] = [];
 
   const { getGmapsDockerConfig, isGmapsDockerAvailable, scrapeGmapsDockerQuery } =
@@ -834,7 +988,7 @@ async function scrapeGoogleMapsMultiQuery(
   for (const query of locationQueries) {
     if (collected.length >= mapsTarget) break;
     const need = mapsTarget - collected.length;
-    const limit = Math.min(maxPerQuery, need);
+    const limit = Math.max(8, Math.min(maxPerQuery, need + 8));
     if (useGmapsDocker) {
       const dockerResult = await scrapeGmapsDockerQuery(
         query,
@@ -1014,15 +1168,23 @@ async function scrapeGoogleMaps(
           email = await fetchEmailFromSite(website, biz.name, niche, leadLocation, aiProvider);
         }
 
-        // Step 3: Try inferred domain when Maps has no website link
+        // Step 3: Search for the official site when Maps has no website link.
+        // Blind domain guesses are too noisy for local businesses and should
+        // stay out of the email pipeline unless a real site is discovered.
         if (!email && !website) {
-          for (const domain of inferDomainsFromName(biz.name, leadLocation).slice(0, 3)) {
-            const candidate = `https://${domain}`;
-            email = await fetchEmailFromSite(candidate, biz.name, niche, leadLocation, aiProvider);
-            if (email) {
-              website = candidate;
-              break;
-            }
+          const discoveredSite = await discoverOfficialWebsite(
+            biz.name,
+            leadLocation
+          );
+          if (discoveredSite) {
+            website = discoveredSite;
+            email = await fetchEmailFromSite(
+              discoveredSite,
+              biz.name,
+              niche,
+              leadLocation,
+              aiProvider
+            );
           }
         }
 

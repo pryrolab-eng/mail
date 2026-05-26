@@ -14,163 +14,30 @@ import type { GenerateEmailResult } from "@/utils/lead-email-generation";
 import { runSendEmailForLead } from "@/utils/lead-pipeline-send";
 import type { SendLeadEmailResult } from "@/utils/lead-pipeline-send";
 
-export const signUpAction = async (formData: FormData) => {
-  const email = formData.get("email")?.toString();
-  const password = formData.get("password")?.toString();
-  const fullName = formData.get("full_name")?.toString() || '';
-  const supabase = await createClient();
-  const origin = (await headers()).get("origin");
+export async function signUpAction(formData: FormData) {
+  const { signUpAction: run } = await import("@/lib/auth-actions");
+  return run(formData);
+}
 
-  if (!email || !password) {
-    return encodedRedirect(
-      "error",
-      "/sign-up",
-      "Email and password are required",
-    );
-  }
+export async function signInAction(formData: FormData) {
+  const { signInAction: run } = await import("@/lib/auth-actions");
+  return run(formData);
+}
 
-  const { data: { user }, error } = await supabase.auth.signUp({
-    email,
-    password,
-    options: {
-      emailRedirectTo: `${origin}/auth/callback`,
-      data: {
-        full_name: fullName,
-        email: email,
-      }
-    },
-  });
+export async function forgotPasswordAction(formData: FormData) {
+  const { forgotPasswordAction: run } = await import("@/lib/auth-actions");
+  return run(formData);
+}
 
-  console.log("After signUp", error);
+export async function resetPasswordAction(formData: FormData) {
+  const { resetPasswordAction: run } = await import("@/lib/auth-actions");
+  return run(formData);
+}
 
-
-  if (error) {
-    console.error(error.code + " " + error.message);
-    return encodedRedirect("error", "/sign-up", error.message);
-  }
-
-  if (user) {
-    try {
-      const { error: updateError } = await supabase
-        .from('users')
-        .insert({
-          id: user.id,
-          name: fullName,
-          full_name: fullName,
-          email: email,
-          user_id: user.id,
-          token_identifier: user.id,
-          created_at: new Date().toISOString()
-        });
-
-      if (updateError) {
-        console.error('Error updating user profile:', updateError);
-      }
-    } catch (err) {
-      console.error('Error in user profile creation:', err);
-    }
-  }
-
-  return encodedRedirect(
-    "success",
-    "/sign-up",
-    "Thanks for signing up! Please check your email for a verification link.",
-  );
-};
-
-export const signInAction = async (formData: FormData) => {
-  const email = formData.get("email") as string;
-  const password = formData.get("password") as string;
-  const supabase = await createClient();
-
-  const { error } = await supabase.auth.signInWithPassword({
-    email,
-    password,
-  });
-
-  if (error) {
-    return encodedRedirect("error", "/sign-in", error.message);
-  }
-
-  return redirect("/dashboard");
-};
-
-export const forgotPasswordAction = async (formData: FormData) => {
-  const email = formData.get("email")?.toString();
-  const supabase = await createClient();
-  const origin = (await headers()).get("origin");
-  const callbackUrl = formData.get("callbackUrl")?.toString();
-
-  if (!email) {
-    return encodedRedirect("error", "/forgot-password", "Email is required");
-  }
-
-  const { error } = await supabase.auth.resetPasswordForEmail(email, {
-    redirectTo: `${origin}/auth/callback?redirect_to=/dashboard/reset-password`,
-  });
-
-  if (error) {
-    console.error(error.message);
-    return encodedRedirect(
-      "error",
-      "/forgot-password",
-      "Could not reset password",
-    );
-  }
-
-  if (callbackUrl) {
-    return redirect(callbackUrl);
-  }
-
-  return encodedRedirect(
-    "success",
-    "/forgot-password",
-    "Check your email for a link to reset your password.",
-  );
-};
-
-export const resetPasswordAction = async (formData: FormData) => {
-  const supabase = await createClient();
-
-  const password = formData.get("password") as string;
-  const confirmPassword = formData.get("confirmPassword") as string;
-
-  if (!password || !confirmPassword) {
-    return encodedRedirect(
-      "error",
-      "/dashboard/reset-password",
-      "Password and confirm password are required",
-    );
-  }
-
-  if (password !== confirmPassword) {
-    return encodedRedirect(
-      "error",
-      "/dashboard/reset-password",
-      "Passwords do not match",
-    );
-  }
-
-  const { error } = await supabase.auth.updateUser({
-    password: password,
-  });
-
-  if (error) {
-    return encodedRedirect(
-      "error",
-      "/dashboard/reset-password",
-      "Password update failed",
-    );
-  }
-
-  return encodedRedirect("success", "/sign-in", "Password updated successfully. Please sign in with your new password.");
-};
-
-export const signOutAction = async () => {
-  const supabase = await createClient();
-  await supabase.auth.signOut();
-  return redirect("/sign-in");
-};
+export async function signOutAction() {
+  const { signOutAction: run } = await import("@/lib/auth-actions");
+  return run();
+}
 
 /** Pipeline Step 3: scrape company website → company_context, stage = researched */
 export const researchLead = async (
@@ -519,7 +386,7 @@ export const addSMTPAccountAction = async (
       user_name: account.user || account.email,
       password: account.password,
       provider: account.provider,
-      daily_limit: account.daily_limit,
+      daily_limit: Math.min(account.daily_limit || 50, 50),
       status: 'active',
       sent_today: 0
     };

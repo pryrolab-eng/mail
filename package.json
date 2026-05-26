@@ -4,6 +4,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "worker": "node scripts/automation-worker.mjs",
+    "worker:once": "node scripts/automation-worker.mjs --once",
     "supabase:login": "supabase login",
     "supabase:link": "supabase link --project-ref bdfzckpwasyycwjggsfb",
     "supabase:push": "supabase db push --linked --yes",

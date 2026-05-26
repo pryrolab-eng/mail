@@ -24,6 +24,10 @@ import {
   inferIndustryKey,
   searchPublicCompanyInfo,
 } from "@/utils/company-public-research";
+import {
+  runLeadResearchAgent,
+  serializeLeadResearchAgent,
+} from "@/utils/lead-research-agent";
 
 const FREE_EMAIL_DOMAINS = new Set([
   "gmail.com",
@@ -353,6 +357,22 @@ export async function runLeadResearch(
       );
     }
 
+    const agent = await runLeadResearchAgent({
+      companyName: row.company_name,
+      location: row.location,
+      niche: storedNiche,
+      website: resolvedWebsite,
+      phone: row.phone,
+    });
+    const agentBlock = serializeLeadResearchAgent(agent);
+    if (!resolvedWebsite && agent.officialWebsite) {
+      resolvedWebsite = agent.officialWebsite;
+    }
+    if (agent.summary && websiteText.length < 120) {
+      websiteText = [websiteText, agent.summary].filter(Boolean).join("\n");
+    }
+    const agentSources = agent.evidence.map((item) => item.url).filter(Boolean);
+
     const businessType =
       industryKey === "arcade"
         ? "24-hour entertainment arcade (gaming venue)"
@@ -386,11 +406,11 @@ export async function runLeadResearch(
           ? `Google Maps listing: ${listingFacts}`
           : undefined),
       publicSnippets: undefined,
-      sources: Array.from(new Set(sources)),
+      sources: Array.from(new Set([...sources, ...agentSources])),
     });
 
     const priorContext = row.company_context?.trim() ?? "";
-    const mergedContext = [researchBlock, priorContext]
+    const mergedContext = [researchBlock, agentBlock, priorContext]
       .filter(Boolean)
       .join("\n\n")
       .slice(0, 3500);
@@ -418,7 +438,7 @@ export async function runLeadResearch(
       useAi: !!aiProvider,
     });
 
-    const stored = `${researchBlock}\n\n${serializeLeadIntelForStorage(intel)}`;
+    const stored = `${researchBlock}\n\n${agentBlock}\n\n${serializeLeadIntelForStorage(intel)}`;
     await markLeadPipeline(supabase, leadId, userId, "researched", {
       company_context: stored,
       website: resolvedWebsite ?? row.website ?? undefined,
