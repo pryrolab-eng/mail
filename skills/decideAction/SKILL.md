@@ -11,6 +11,6 @@ Apply deterministic lead routing.
 
 ## Rules
 - Safety beats LLM.
-- Verified official-domain email plus exact evidence may auto_queue.
+- Verified official-domain email plus exact evidence plus high-confidence ownerName may auto_queue.
+- Missing or medium-confidence ownerName requires human review.
 - Missing safe email becomes review, phone_only, or rejected.
-

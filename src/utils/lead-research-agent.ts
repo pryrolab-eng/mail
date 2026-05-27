@@ -74,6 +74,18 @@ export type BusinessFact = {
   salesRelevance: SalesRelevance;
 };
 
+export type OwnerNameResult = {
+  ownerName: string | null;
+  firstName: string | null;
+  title: string | null;
+  source: string | null;
+  confidence: AgentConfidence;
+  salutation: string | null;
+  fallbackUsed: boolean;
+  autoSendAllowed: boolean;
+  reason?: string;
+};
+
 export type AgentContact = {
   type: "email" | "phone" | "social" | "website";
   value: string;
@@ -102,6 +114,7 @@ export type LeadResearchAgentDecision = {
 export type LeadResearchAgentResult = LeadResearchAgentDecision & {
   evidence: LeadResearchAgentEvidence[];
   contacts: AgentContact[];
+  ownerName: OwnerNameResult;
   toolCalls: Array<{
     skillId?: string;
     tool: string;
@@ -133,6 +146,21 @@ class AgentReasoningError extends Error {
 }
 
 type AgentSkillTrace = LeadResearchAgentResult["toolCalls"][number];
+
+type AgentPlanStep = {
+  id: string;
+  tool: string;
+  objective: string;
+  status: "pending" | "completed" | "skipped";
+  dependsOn?: string[];
+  skipReason?: string;
+};
+
+type AgentResearchPlan = {
+  goal: string;
+  steps: AgentPlanStep[];
+  safetyGates: string[];
+};
 
 type AgentSkillResult<TOutput extends Record<string, unknown> = Record<string, unknown>> = {
   output: TOutput;
@@ -322,6 +350,95 @@ function buildAgentSearchQueries(input: {
       ].filter(Boolean)
     )
   );
+}
+
+function buildResearchPlan(input: {
+  companyName: string;
+  location: string;
+  website?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  queries: string[];
+}): AgentResearchPlan {
+  const hasKnownWebsite = !!input.website && !isDirectoryUrl(input.website);
+  const hasSeedContact = !!input.email || !!input.phone;
+  const steps: AgentPlanStep[] = [
+    {
+      id: "normalize_input",
+      tool: "normalizeInput",
+      objective: "Clean listing noise and generate search queries.",
+      status: "completed",
+    },
+    {
+      id: "search_web",
+      tool: "searchWeb",
+      objective: "Find official domains, indexed pages, and public snippets.",
+      status: input.queries.length ? "pending" : "skipped",
+      skipReason: input.queries.length ? undefined : "No usable search queries.",
+      dependsOn: ["normalize_input"],
+    },
+    {
+      id: "classify_sources",
+      tool: "classifySource",
+      objective: "Separate official, directory, social, and unrelated evidence.",
+      status: "pending",
+      dependsOn: ["search_web"],
+    },
+    {
+      id: "fetch_official_pages",
+      tool: "fetchTargetedPages",
+      objective: "Fetch high-value official pages once a domain is known.",
+      status: "pending",
+      dependsOn: hasKnownWebsite ? ["normalize_input"] : ["classify_sources"],
+    },
+    {
+      id: "extract_contacts",
+      tool: "extractContacts",
+      objective: "Collect emails, phones, social links, and website contact points.",
+      status: "pending",
+      dependsOn: ["classify_sources", "fetch_official_pages"],
+    },
+    {
+      id: "extract_owner_name",
+      tool: "extractOwnerName",
+      objective: "Find a trusted owner, doctor, founder, director, or decision-maker salutation.",
+      status: "pending",
+      dependsOn: ["classify_sources", "fetch_official_pages"],
+    },
+    {
+      id: "verify_ownership",
+      tool: "verifyOwnership",
+      objective: "Verify email deliverability, ownership, and suppression status.",
+      status: "pending",
+      skipReason: hasSeedContact ? undefined : "Runs after contact extraction if any email is found.",
+      dependsOn: ["extract_contacts", "extract_owner_name"],
+    },
+    {
+      id: "decide_action",
+      tool: "decideAction",
+      objective: "Apply deterministic safety gates before any AI recommendation.",
+      status: "pending",
+      dependsOn: ["verify_ownership"],
+    },
+    {
+      id: "reason_with_llm",
+      tool: "reasonWithLLM",
+      objective: "Use compact typed evidence for a structured recommendation.",
+      status: "pending",
+      dependsOn: ["decide_action"],
+    },
+  ];
+
+  return {
+    goal: `Research ${input.companyName.trim()}${input.location ? ` in ${input.location}` : ""} and route it safely for outreach.`,
+    steps,
+    safetyGates: [
+      "Auto-send requires a verified business-owned email.",
+      "Auto-send requires exact official-site evidence.",
+      "Directory, social, or free-email evidence is review-only.",
+      "LLM recommendations are always passed through deterministic safety gates.",
+    ],
+  };
 }
 
 function sanitizeLocationForSearch(location?: string | null): string {
@@ -538,6 +655,117 @@ function extractBusinessFactsFromPage(text: string, source: string): BusinessFac
   }
 
   return Array.from(new Map(facts.map((fact) => [`${fact.category}:${fact.fact.toLowerCase()}`, fact])).values()).slice(0, 16);
+}
+
+function sourceConfidenceForOwner(source: string, sourceType: AgentSourceType): AgentConfidence {
+  const path = (() => {
+    try {
+      return new URL(source).pathname.toLowerCase();
+    } catch {
+      return source.toLowerCase();
+    }
+  })();
+  if (sourceType === "official_site" && /about|team|doctor|staff|provider/.test(path)) {
+    return "high";
+  }
+  if (/linkedin|facebook|news|press/.test(source)) return "medium";
+  if (sourceType === "directory") return "low";
+  return sourceType === "official_site" ? "medium" : "low";
+}
+
+function ownerTitleRank(title: string | null): number {
+  const value = title?.toLowerCase() ?? "";
+  if (/founder|owner|chief|medical director/.test(value)) return 0;
+  if (/director|head of/.test(value)) return 1;
+  if (/\bdr\.?\b|doctor|surgeon|dentist|dermatologist/.test(value)) return 2;
+  return 3;
+}
+
+function cleanOwnerName(value: string): string | null {
+  const clean = value
+    .replace(/\b(Dr\.?|Doctor|Founder|Co-Founder|Owner|Director|Medical Director|Chief|Head of)\b/gi, " ")
+    .replace(/[^a-zA-Z\s'.-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const parts = clean.split(/\s+/).filter(Boolean);
+  if (parts.length < 1 || parts.length > 4) return null;
+  if (parts.some((part) => part.length < 2 && !/^[A-Z]\.?$/.test(part))) return null;
+  if (/^(about|team|services|contact|clinic|center|centre)$/i.test(parts[0])) return null;
+  return parts.map((part) => part[0].toUpperCase() + part.slice(1)).join(" ");
+}
+
+function buildOwnerSalutation(name: string, title: string | null): string {
+  const firstName = name.split(/\s+/)[0] ?? name;
+  if (/\bdr\.?\b|doctor|surgeon|dentist|dermatologist|medical/i.test(title ?? "")) {
+    return `Dr. ${firstName}`;
+  }
+  return firstName;
+}
+
+function extractOwnerNameFromEvidence(evidence: LeadResearchAgentEvidence[]): OwnerNameResult {
+  const candidates: Array<OwnerNameResult & { rank: number }> = [];
+  const trusted = evidence.filter(
+    (item) => !/review|testimonial|comment/i.test(`${item.title} ${item.snippet} ${item.url}`)
+  );
+
+  for (const item of trusted) {
+    const text = [
+      item.title,
+      item.snippet,
+      ...(item.extractedFacts.facts ?? []),
+      ...((item.extractedFacts.businessFacts ?? []).map((fact) => fact.fact)),
+    ].join(" ");
+    const patterns: Array<{ regex: RegExp; nameGroup: number; titleGroup: number }> = [
+      {
+        regex:
+          /\b(Dr\.?|Doctor|Founder|Co-Founder|Owner|Director|Medical Director|Chief(?:\s+\w+)?|Head of [A-Za-z ]{2,40})\s+([A-Z][a-zA-Z'.-]+(?:\s+[A-Z][a-zA-Z'.-]+){0,3})\b/g,
+        titleGroup: 1,
+        nameGroup: 2,
+      },
+      {
+        regex:
+          /\b([A-Z][a-zA-Z'.-]+(?:\s+[A-Z][a-zA-Z'.-]+){0,3})\s*(?:,|-|–|—|\sis\s|\sas\s)?\s*\b(founder|co-founder|owner|director|medical director|chief|head of|doctor|surgeon|dentist|dermatologist)\b/gi,
+        titleGroup: 2,
+        nameGroup: 1,
+      },
+    ];
+    for (const pattern of patterns) {
+      for (const match of text.matchAll(pattern.regex)) {
+        const name = cleanOwnerName(match[pattern.nameGroup] ?? "");
+        const title = String(match[pattern.titleGroup] ?? "").trim();
+        if (!name) continue;
+        const confidence = sourceConfidenceForOwner(item.url, item.sourceType);
+        candidates.push({
+          ownerName: name,
+          firstName: name.split(/\s+/)[0] ?? null,
+          title,
+          source: item.url,
+          confidence,
+          salutation: buildOwnerSalutation(name, title),
+          fallbackUsed: false,
+          autoSendAllowed: confidence === "high",
+          rank: ownerTitleRank(title) + (confidence === "high" ? 0 : confidence === "medium" ? 10 : 20),
+        });
+      }
+    }
+  }
+
+  const best = candidates.sort((a, b) => a.rank - b.rank)[0];
+  if (best) {
+    const { rank: _rank, ...result } = best;
+    return result;
+  }
+  return {
+    ownerName: null,
+    firstName: null,
+    title: null,
+    source: null,
+    confidence: "low",
+    salutation: null,
+    fallbackUsed: true,
+    autoSendAllowed: false,
+    reason: "No explicit owner, founder, doctor, or director name found in trusted evidence.",
+  };
 }
 
 function sourcePathPriority(url: string): number {
@@ -926,7 +1154,8 @@ function safeDecision(
   decision: LeadResearchAgentDecision,
   contacts: AgentContact[],
   evidence: LeadResearchAgentEvidence[],
-  phone?: string | null
+  phone?: string | null,
+  ownerName?: OwnerNameResult
 ): LeadResearchAgentDecision {
   const normalizedDecision: LeadResearchAgentDecision = {
     ...decision,
@@ -954,7 +1183,9 @@ function safeDecision(
       item.extractedFacts.relationship?.includes("exact")
   );
 
-  if (safeBusinessEmail && exactOfficialEvidence) {
+  const hasHighConfidenceOwner = ownerName?.confidence === "high" && !!ownerName.ownerName;
+
+  if (safeBusinessEmail && exactOfficialEvidence && hasHighConfidenceOwner) {
     return normalizedDecision;
   }
 
@@ -969,7 +1200,9 @@ function safeDecision(
       draftAllowed: !!anyVerifiedEmail,
       autoSendAllowed: false,
       reason:
-        "Safety override: no exact official-site evidence with a verified business-owned email.",
+        !hasHighConfidenceOwner
+          ? "Safety override: owner/decision-maker name is missing or not high confidence."
+          : "Safety override: no exact official-site evidence with a verified business-owned email.",
     };
   }
 
@@ -1046,6 +1279,7 @@ function compileEvidenceForLLM(params: {
   evidence: LeadResearchAgentEvidence[];
   contacts: AgentContact[];
   officialWebsite: string | null;
+  ownerName?: OwnerNameResult;
 }): {
   officialWebsite: string | null;
   safety: {
@@ -1069,6 +1303,7 @@ function compileEvidenceForLLM(params: {
     relationship?: string[];
   }>;
   facts: BusinessFact[];
+  ownerName: OwnerNameResult | null;
   incompleteResearch: boolean;
   missingFields: string[];
 } {
@@ -1118,6 +1353,7 @@ function compileEvidenceForLLM(params: {
       ...fact,
       fact: truncateText(fact.fact, 180),
     })),
+    ownerName: params.ownerName ?? null,
     incompleteResearch: missingFields.length > 0,
     missingFields,
   };
@@ -1264,6 +1500,31 @@ export async function runLeadResearchAgent(input: {
   });
   const location = String(normalized.location ?? "");
   const queries = normalized.queries as string[];
+  const plan = buildResearchPlan({
+    companyName: String(normalized.companyName ?? input.companyName),
+    location,
+    website: typeof normalized.website === "string" ? normalized.website : input.website,
+    email: typeof normalized.email === "string" ? normalized.email : input.email,
+    phone: typeof normalized.phone === "string" ? normalized.phone : input.phone,
+    queries,
+  });
+  recordAgentSkill({
+    traces: toolCalls,
+    name: "planResearch",
+    input: {
+      companyName: String(normalized.companyName ?? input.companyName),
+      location,
+      hasWebsite: !!normalized.website,
+      hasEmail: !!normalized.email,
+      hasPhone: !!normalized.phone,
+    },
+    output: {
+      goal: plan.goal,
+      steps: plan.steps,
+      safetyGates: plan.safetyGates,
+    },
+    confidence: "high",
+  });
   console.log(`[lead-agent] start: ${input.companyName}`);
   console.log(`[lead-agent] search plan: ${queries.join(" | ")}`);
 
@@ -1538,7 +1799,27 @@ export async function runLeadResearchAgent(input: {
     evidence,
     phone: input.phone,
   });
-  decision = safeDecision(decision, contacts, evidence, input.phone);
+  const ownerName = extractOwnerNameFromEvidence(evidence);
+  recordAgentSkill({
+    traces: toolCalls,
+    name: "extractOwnerName",
+    input: { evidenceItems: evidence.length },
+    output: {
+      ownerName: ownerName.ownerName,
+      firstName: ownerName.firstName,
+      title: ownerName.title,
+      source: ownerName.source,
+      confidence: ownerName.confidence,
+      salutation: ownerName.salutation,
+      fallbackUsed: ownerName.fallbackUsed,
+      autoSendAllowed: ownerName.autoSendAllowed,
+      reason: ownerName.reason,
+    },
+    confidence: ownerName.confidence,
+    warnings: ownerName.ownerName ? [] : [ownerName.reason ?? "Owner name not found."],
+  });
+
+  decision = safeDecision(decision, contacts, evidence, input.phone, ownerName);
   recordAgentSkill({
     traces: toolCalls,
     name: "decideAction",
@@ -1557,7 +1838,7 @@ export async function runLeadResearchAgent(input: {
   if (input.aiProvider?.api_key) {
     try {
       console.log(`[lead-agent] reasonWithLLM: ${input.aiProvider.provider}`);
-      const compactContext = compileEvidenceForLLM({ evidence, contacts, officialWebsite });
+      const compactContext = compileEvidenceForLLM({ evidence, contacts, officialWebsite, ownerName });
       recordAgentSkill({
         traces: toolCalls,
         name: "compileLLMContext",
@@ -1585,7 +1866,7 @@ export async function runLeadResearchAgent(input: {
         evidence,
         contacts,
       });
-      decision = safeDecision(reasoned.decision, contacts, evidence, input.phone);
+      decision = safeDecision(reasoned.decision, contacts, evidence, input.phone, ownerName);
       modelUsed = reasoned.model;
       recordAgentSkill({
         traces: toolCalls,
@@ -1643,6 +1924,7 @@ export async function runLeadResearchAgent(input: {
     ...decision,
     evidence,
     contacts,
+    ownerName,
     toolCalls,
     modelUsed,
   };
@@ -1682,6 +1964,7 @@ export async function saveLeadResearchAgentResult(
         leadType: result.leadType,
         officialWebsite: result.officialWebsite,
         bestEmail: result.bestEmail,
+        ownerName: result.ownerName,
         evidenceSummary: result.evidenceSummary,
         confidence: result.confidence,
         risk: result.risk,
@@ -1792,6 +2075,9 @@ export function serializeLeadResearchAgent(result: LeadResearchAgentResult): str
     "[AGENT_RESEARCH]",
     `Official website: ${result.officialWebsite ?? "not found"}`,
     `Best email: ${result.bestEmail ?? "not found"}`,
+    `Owner name: ${result.ownerName.ownerName ?? "not found"}`,
+    `Owner salutation: ${result.ownerName.salutation ?? "not found"}`,
+    `Owner confidence: ${result.ownerName.confidence}`,
     `Confidence: ${result.confidence}`,
     `Risk: ${result.risk}`,
     `Recommended action: ${result.recommendedAction}`,

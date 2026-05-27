@@ -55,6 +55,18 @@ type EvidenceFact = {
   salesRelevance?: "high" | "medium" | "low";
 };
 
+type OwnerNameContext = {
+  ownerName: string | null;
+  firstName: string | null;
+  title: string | null;
+  source: string | null;
+  confidence: "high" | "medium" | "low";
+  salutation: string | null;
+  fallbackUsed: boolean;
+  autoSendAllowed: boolean;
+  reason?: string;
+};
+
 type EmailDraft = {
   subject: string;
   body: string;
@@ -258,6 +270,78 @@ async function loadEvidenceFacts(
   return ranked.slice(0, 5);
 }
 
+async function loadOwnerNameContext(
+  supabase: SupabaseClient,
+  userId: string,
+  leadId: string,
+  fallbackContext: string
+): Promise<OwnerNameContext | null> {
+  const { data } = await supabase
+    .from("agent_runs")
+    .select("output")
+    .eq("user_id", userId)
+    .eq("lead_id", leadId)
+    .eq("run_type", "research")
+    .order("started_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  const output = data?.output as { ownerName?: Partial<OwnerNameContext> } | null | undefined;
+  const owner = output?.ownerName;
+  if (owner && typeof owner === "object") {
+    return {
+      ownerName: typeof owner.ownerName === "string" ? owner.ownerName : null,
+      firstName: typeof owner.firstName === "string" ? owner.firstName : null,
+      title: typeof owner.title === "string" ? owner.title : null,
+      source: typeof owner.source === "string" ? owner.source : null,
+      confidence:
+        owner.confidence === "high" || owner.confidence === "medium" || owner.confidence === "low"
+          ? owner.confidence
+          : "low",
+      salutation: typeof owner.salutation === "string" ? owner.salutation : null,
+      fallbackUsed: Boolean(owner.fallbackUsed),
+      autoSendAllowed: owner.autoSendAllowed === true,
+      reason: typeof owner.reason === "string" ? owner.reason : undefined,
+    };
+  }
+
+  const contextMatch = fallbackContext.match(/Owner name:\s*(.+)/i);
+  if (contextMatch && !/not found/i.test(contextMatch[1] ?? "")) {
+    const name = contextMatch[1].trim();
+    const salutationMatch = fallbackContext.match(/Owner salutation:\s*(.+)/i);
+    const confidenceMatch = fallbackContext.match(/Owner confidence:\s*(high|medium|low)/i);
+    return {
+      ownerName: name,
+      firstName: name.split(/\s+/)[0] ?? null,
+      title: null,
+      source: null,
+      confidence: (confidenceMatch?.[1]?.toLowerCase() as OwnerNameContext["confidence"]) ?? "low",
+      salutation: salutationMatch && !/not found/i.test(salutationMatch[1]) ? salutationMatch[1].trim() : name.split(/\s+/)[0],
+      fallbackUsed: false,
+      autoSendAllowed: confidenceMatch?.[1]?.toLowerCase() === "high",
+    };
+  }
+
+  return null;
+}
+
+function roleSalutationForLead(lead: LeadRow): string {
+  const blob = `${lead.company_name} ${lead.niche ?? ""}`.toLowerCase();
+  if (/dermatology|clinic|dental|hospital|medical|health|doctor/.test(blob)) return "Doctor";
+  if (/pharmacy|pharmacist/.test(blob)) return "Pharmacist";
+  if (/school|academy|college|education/.test(blob)) return "Director";
+  if (/restaurant|cafe|kitchen|chef/.test(blob)) return "Chef";
+  return "Team";
+}
+
+function resolveEmailSalutation(ownerName: OwnerNameContext | null, lead: LeadRow, fallbackFirstName: string): string {
+  if (ownerName?.confidence === "high" && ownerName.salutation) return ownerName.salutation;
+  if (ownerName?.confidence === "medium" && ownerName.firstName) return ownerName.firstName;
+  const role = roleSalutationForLead(lead);
+  if (role !== "Team") return role;
+  return fallbackFirstName && fallbackFirstName !== "Team" ? fallbackFirstName : "Team";
+}
+
 function buildWriteEmailSystemPrompt(senderName: string): string {
   return `You are the writeEmail skill for a B2B outreach agent.
 Return ONLY valid JSON: {"subject":"...","body":"...","warnings":[]}
@@ -266,16 +350,18 @@ No markdown, no backticks, no prose before or after the JSON.
 
 Rules:
 - Use only the evidence facts provided by the user. Do not invent facts, performance claims, awards, revenue, staff size, or pain points.
-- You MUST explicitly use at least one concrete evidence fact in the first paragraph.
+- Body must begin with a greeting line: Hi [contactName],
+- The first content paragraph after the greeting MUST explicitly use at least one concrete evidence fact.
 - If the evidence is thin, write a cautious email or add a warning; never fill with compliments.
 - Subject must be under 10 words.
-- Body must be under 140 words excluding signature.
+- Subject must reference business context and must not use solutions, partnership, or opportunity.
+- Body must be 65-115 words excluding signature.
 - Body must use 3-5 short paragraphs before the signature, separated by blank lines.
 - No one giant paragraph.
 - Tone: calm, warm, specific, professional.
 - Frame operational pain as a common possibility, not as a diagnosis.
 - Do not praise the business with words like impressed, exceptional, friendly, knowledgeable, top-notch, dedicated, or seamless unless those exact claims are in evidence.
-- Start with a concrete evidence fact, not a compliment.
+- Never write Hi there, Dear Sir, or Dear Madam.
 - Include a simple 10-minute call CTA.
 - End with this exact signature:
 Best regards,
@@ -287,7 +373,8 @@ function buildWriteEmailPrompt(params: {
   lead: LeadRow;
   facts: EvidenceFact[];
   senderName: string;
-  contactName: string;
+  salutation: string;
+  ownerName: OwnerNameContext | null;
   repair?: { previousDraft: EmailDraft; failures: string[] };
 }): string {
   return JSON.stringify(
@@ -297,16 +384,24 @@ function buildWriteEmailPrompt(params: {
         companyName: params.lead.company_name,
         niche: params.lead.niche,
         location: params.lead.location,
-        contactName: params.contactName,
+        salutation: params.salutation,
       },
+      ownerName: params.ownerName,
       senderProfile: {
         name: params.senderName,
         title: "Executive Sales",
         company: "Pryro",
       },
+      requiredBodyFormat: [
+        `Hi ${params.salutation},`,
+        "One short paragraph using a concrete evidence fact.",
+        "One short paragraph connecting Pryro to a cautious operational workflow point.",
+        "One short paragraph with a 10-minute call CTA.",
+        `Best regards,\n${params.senderName}\nExecutive Sales, Pryro`,
+      ],
       evidence: params.facts,
       evidenceRequirement:
-        "The first paragraph must mention one concrete fact from evidence, such as a service, opening hours, address, team role, or appointment/contact detail.",
+        "The first content paragraph after the greeting must mention one concrete fact from evidence, such as a service, opening hours, address, team role, or appointment/contact detail.",
       forbiddenClaims: [
         "guaranteed",
         "first 60 days",
@@ -320,6 +415,16 @@ function buildWriteEmailPrompt(params: {
     null,
     2
   );
+}
+
+function normalizeGreeting(body: string, contactName: string): string {
+  const salutation = contactName.trim() || "Team";
+  const greeting = `Hi ${salutation},`;
+  const trimmed = body.trim();
+  if (/^Hi\s+[^,\n]+,?\s*(?:\n|$)/i.test(trimmed)) {
+    return trimmed.replace(/^Hi\s+[^,\n]+,?\s*/i, `${greeting}\n\n`);
+  }
+  return `${greeting}\n\n${trimmed}`;
 }
 
 function extractJson(raw: string): unknown {
@@ -414,7 +519,7 @@ function extractJsonStringField(raw: string, field: string): string | null {
   return null;
 }
 
-function parseWriteEmailOutput(raw: string, senderName: string): EmailDraft {
+function parseWriteEmailOutput(raw: string, senderName: string, contactName: string): EmailDraft {
   let parsed: Partial<EmailDraft>;
   let parserRecovered = false;
   try {
@@ -434,6 +539,7 @@ function parseWriteEmailOutput(raw: string, senderName: string): EmailDraft {
   let body = String(parsed.body ?? "").trim();
   if (!subject) throw new Error("writeEmail returned no subject");
   if (!body) throw new Error("writeEmail returned no body");
+  body = normalizeGreeting(body, contactName);
   if (!/Best regards/i.test(body)) {
     body = `${body}\n\nBest regards,\n${senderName}\nExecutive Sales, Pryro`;
   }
@@ -487,11 +593,20 @@ function validateEmailDraft(draft: EmailDraft, facts: EvidenceFact[]): EmailVali
   if (subjectWords === 0 || subjectWords > 10) {
     failures.push(`subject must be under 10 words (currently ${subjectWords})`);
   }
+  if (/\b(solutions?|partnership|opportunity)\b/i.test(draft.subject)) {
+    failures.push("subject uses forbidden generic wording");
+  }
 
   const bodyWithoutSignature = draft.body.replace(/Best regards[\s\S]*$/i, "").trim();
   const words = bodyWithoutSignature.split(/\s+/).filter(Boolean).length;
   if (words > 140) failures.push(`body is ${words} words; max is 140`);
-  if (words < 55) failures.push(`body is ${words} words; minimum is 55`);
+  if (words < 65) failures.push(`body is ${words} words; minimum is 65`);
+  if (!/^Hi\s+[^,\n]+,\s*(?:\n|$)/i.test(bodyWithoutSignature)) {
+    failures.push("greeting is missing or malformed");
+  }
+  if (/^Hi\s+there,|Dear Sir|Dear Madam/i.test(bodyWithoutSignature)) {
+    failures.push("forbidden salutation");
+  }
 
   const paragraphs = bodyWithoutSignature
     .split(/\n\s*\n/)
@@ -520,6 +635,8 @@ function validateEmailDraft(draft: EmailDraft, facts: EvidenceFact[]): EmailVali
     "top-notch",
     "dedicated",
     "seamless experiences",
+    "high quality",
+    "best in class",
   ].filter((phrase) => draft.body.toLowerCase().includes(phrase) && !evidenceBlob.includes(phrase));
   if (unsupportedPraise.length > 0) {
     failures.push(`unsupported praise/quality claims: ${unsupportedPraise.join(", ")}`);
@@ -545,6 +662,10 @@ function validateEmailDraft(draft: EmailDraft, facts: EvidenceFact[]): EmailVali
 function reviewEmailSafety(draft: EmailDraft, facts: EvidenceFact[]): EmailValidation {
   const failures: string[] = [];
   const evidenceBlob = facts.map((fact) => fact.fact.toLowerCase()).join(" ");
+  const contentOnly = draft.body
+    .replace(/^Hi\s+[^,\n]+,?\s*/i, "")
+    .replace(/Best regards[\s\S]*$/i, "")
+    .trim();
   const riskyPhrases = [
     "i saw your revenue",
     "your team is struggling",
@@ -553,12 +674,18 @@ function reviewEmailSafety(draft: EmailDraft, facts: EvidenceFact[]): EmailValid
     "your cash flow problem",
   ];
   for (const phrase of riskyPhrases) {
-    if (draft.body.toLowerCase().includes(phrase)) {
+    if (contentOnly.toLowerCase().includes(phrase)) {
       failures.push(`unsafe unsupported claim: ${phrase}`);
     }
   }
-  if (/founder|director|owner|doctor|dr\./i.test(draft.body) && !/founder|director|owner|doctor|dr\./i.test(evidenceBlob)) {
+  if (/founder|director|owner|doctor|dr\./i.test(contentOnly) && !/founder|director|owner|doctor|dr\./i.test(evidenceBlob)) {
     failures.push("mentions a person/role that is not supported by evidence");
+  }
+  if (/^Hi\s+there,|Dear Sir|Dear Madam/i.test(draft.body.trim())) {
+    failures.push("salutation is generic or forbidden");
+  }
+  if (/support your efforts|explore this further|quality services|your business needs/i.test(contentOnly)) {
+    failures.push("value prop or CTA is too generic");
   }
   return { passed: failures.length === 0, failures };
 }
@@ -647,6 +774,8 @@ export async function runGenerateEmailForLead(
       email: row.email,
       company_name: row.company_name,
     });
+    const ownerName = await loadOwnerNameContext(supabase, userId, leadId, context);
+    const salutation = resolveEmailSalutation(ownerName, row, contact_name === "Team" ? first_name : contact_name);
 
     const facts = await loadEvidenceFacts(supabase, userId, leadId, context);
     if (facts.length === 0) {
@@ -682,7 +811,8 @@ export async function runGenerateEmailForLead(
       lead: row,
       facts,
       senderName: repName,
-      contactName: contact_name === "Team" ? "there" : first_name,
+      salutation,
+      ownerName,
     };
 
     let raw = "";
@@ -701,7 +831,7 @@ export async function runGenerateEmailForLead(
           systemMessage,
           buildWriteEmailPrompt(promptBase)
         );
-        const parsed = parseWriteEmailOutput(raw, repName);
+        const parsed = parseWriteEmailOutput(raw, repName, promptBase.salutation);
         return {
           output: {
             subject: parsed.subject,
@@ -728,7 +858,31 @@ export async function runGenerateEmailForLead(
         rawResponse: raw.slice(0, 200),
       });
     }
-    let validation = validateEmailDraft(draft, facts);
+    const validationSkill = await runSkill({
+      id: "validateOutput",
+      input: {
+        leadId,
+        subject: draft.subject,
+        bodyWords: draft.body.replace(/Best regards[\s\S]*$/i, "").split(/\s+/).filter(Boolean).length,
+      },
+      run: () => {
+        const result = validateEmailDraft(draft, facts);
+        return {
+          output: {
+            passed: result.passed,
+            failures: result.failures,
+          },
+          confidence: result.passed ? "high" : "medium",
+          warnings: result.failures,
+        };
+      },
+    });
+    let validation: EmailValidation = {
+      passed: validationSkill.output.passed === true,
+      failures: Array.isArray(validationSkill.output.failures)
+        ? validationSkill.output.failures.map((failure) => String(failure))
+        : [],
+    };
 
     if (!validation.passed) {
       const repairSkill = await runSkill({
@@ -753,7 +907,7 @@ export async function runGenerateEmailForLead(
               },
             })
           );
-          const parsed = parseWriteEmailOutput(raw, repName);
+          const parsed = parseWriteEmailOutput(raw, repName, promptBase.salutation);
           return {
             output: {
               subject: parsed.subject,

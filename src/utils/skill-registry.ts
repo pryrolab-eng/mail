@@ -1,13 +1,16 @@
 export type SkillId =
+  | "planResearch"
   | "searchWeb"
   | "fetchTargetedPages"
   | "extractBusinessFacts"
+  | "extractOwnerName"
   | "extractContacts"
   | "verifyOwnership"
   | "compileLLMContext"
   | "reasonWithLLM"
   | "decideAction"
   | "writeEmail"
+  | "validateOutput"
   | "reviewEmailSafety";
 
 export type SkillConfidence = "high" | "medium" | "low";
@@ -48,6 +51,17 @@ const objectSchema = (properties: Record<string, unknown> = {}) => ({
 
 export const BUILT_IN_SKILLS: SkillMetadata[] = [
   {
+    id: "planResearch",
+    name: "Plan Research",
+    version: "1.0.0",
+    description: "Build an explicit lead research plan from available lead inputs and safety gates.",
+    trigger: "research_start",
+    inputSchema: objectSchema({ companyName: { type: "string" }, location: { type: "string" } }),
+    outputSchema: objectSchema({ goal: { type: "string" }, steps: { type: "array" } }),
+    rules: ["Prefer official evidence.", "Skip tools only when their inputs are unavailable.", "Record safety gates before LLM reasoning."],
+    enabled: true,
+  },
+  {
     id: "searchWeb",
     name: "Search Web",
     version: "1.0.0",
@@ -78,6 +92,17 @@ export const BUILT_IN_SKILLS: SkillMetadata[] = [
     inputSchema: objectSchema({ pages: { type: "array" } }),
     outputSchema: objectSchema({ businessFacts: { type: "array" } }),
     rules: ["Every fact needs a source.", "Reject reviews, FAQ filler, and generic marketing.", "Use typed categories only."],
+    enabled: true,
+  },
+  {
+    id: "extractOwnerName",
+    name: "Extract Owner Name",
+    version: "1.0.0",
+    description: "Find a named owner, founder, doctor, director, or primary decision maker from trusted evidence.",
+    trigger: "after_fetchTargetedPages",
+    inputSchema: objectSchema({ evidenceItems: { type: "number" } }),
+    outputSchema: objectSchema({ ownerName: { type: "string" }, confidence: { type: "string" } }),
+    rules: ["Never extract from reviews or testimonials.", "Never guess names.", "Missing or unverified names block auto-send."],
     enabled: true,
   },
   {
@@ -144,6 +169,17 @@ export const BUILT_IN_SKILLS: SkillMetadata[] = [
     inputSchema: objectSchema({ evidence: { type: "array" }, senderProfile: { type: "object" } }),
     outputSchema: objectSchema({ subject: { type: "string" }, body: { type: "string" }, warnings: { type: "array" } }),
     rules: ["Use only typed businessFacts.", "No generic praise.", "Use escaped line breaks in JSON.", "3-5 short paragraphs."],
+    enabled: true,
+  },
+  {
+    id: "validateOutput",
+    name: "Validate Output",
+    version: "1.0.0",
+    description: "Run deterministic email checks before repair, safety review, and routing.",
+    trigger: "after_write_email",
+    inputSchema: objectSchema({ subject: { type: "string" }, body: { type: "string" } }),
+    outputSchema: objectSchema({ passed: { type: "boolean" }, failures: { type: "array" } }),
+    rules: ["Reject Hi there.", "Reject forbidden claims and phrases.", "Repair once before human review."],
     enabled: true,
   },
   {

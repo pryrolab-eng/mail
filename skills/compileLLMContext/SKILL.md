@@ -13,4 +13,5 @@ Rank and compact evidence before LLM reasoning or writing.
 - Return typed arrays, never raw text.
 - Max 5 facts for email writing.
 - Prefer high salesRelevance and payment/services/team facts.
-
+- Attach ownerName when available.
+- Missing ownerName blocks auto-send but does not block draft generation.
